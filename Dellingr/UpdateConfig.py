@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 # DESCRIPTION:
-#   Converts the old-style ProDuSe config file to an updated version
+#   Converts the old-style ProDuSe/Dellingr config file to an updated version
 #
 # AUTHOR
 #   Christopher Rushton (ckrushto@sfu.ca)
@@ -26,7 +26,7 @@ def isValidFile(file, parser):
     parser.error("Unable to locate \'%s\': No such file or directory." % file)
 
 
-parser = argparse.ArgumentParser(description="Converts older config files to a format compatible with this version of ProDuSe")
+parser = argparse.ArgumentParser(description="Converts older config files to a format compatible with this version of Dellingr")
 parser.add_argument("-i", "--input", metavar="INI", type=lambda x:isValidFile(x, parser), required=True, help="Input old-style configuration file")
 parser.add_argument("-o", "--output", metavar="INI", required=True, help="Output reformatted configuration file")
 

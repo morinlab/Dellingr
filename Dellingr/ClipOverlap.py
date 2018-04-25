@@ -15,7 +15,7 @@ class ReadIterator:
     The consensus overlap is then assigned to a single read only (thus clipping overlap)
     """
 
-    def __init__(self, inFile, tag, printPrefix="PRODUSE-CLIPOVERLAP"):
+    def __init__(self, inFile, tag, printPrefix="DELLINGR-CLIPOVERLAP"):
         self.inFile = inFile
         self._waitingForMate = {}
         self._trimR1 = True
@@ -642,7 +642,7 @@ parser.add_argument("-o", "--output", metavar="BAM/SAM", help="A path to an outp
 parser.add_argument("--tag_origin", action="store_true", help="Add a read tag indicating from which read a consensus base originated")
 
 
-def main(args=None, sysStdin=None, printPrefix="PRODUSE-CLIPOVERLAP"):
+def main(args=None, sysStdin=None, printPrefix="DELLINGR-CLIPOVERLAP"):
     if args is None:
         if sysStdin is None:
             args = parser.parse_args()
@@ -685,7 +685,7 @@ def main(args=None, sysStdin=None, printPrefix="PRODUSE-CLIPOVERLAP"):
         command += " --" + str(argument)
         if not isinstance(parameter, bool):
             command += " " + str(parameter)
-    header["PG"].append({"ID": "PRODUSE-CLIPOVERLAP", "PN": "ProDuSe", "CL": command})
+    header["PG"].append({"ID": "DELLINGR-CLIPOVERLAP", "PN": "ProDuSe", "CL": command})
 
     # If streams were specified as input or output (represented by a pipe symbol), set those
     if args["input"] == "-":

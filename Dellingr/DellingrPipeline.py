@@ -18,7 +18,7 @@ try: # If not installed, this works
     import AdapterPredict
     import Call
 except ImportError:
-    from ProDuSe import Trim, Collapse, ClipOverlap, __version, AdapterPredict, Call
+    from Dellingr import Trim, Collapse, ClipOverlap, __version, AdapterPredict, Call
 
 
 def isValidFile(file, parser, default=None):
@@ -180,15 +180,15 @@ def checkArgs(rawArgs):
             listArgs.append(str(parameter))
 
     # Point to the default filter included in the distribution
-    try:  # If ProDuSe is installed
-        produsePath = ProDuSe.__path__[0]
-    except NameError:  # i.e. ProDuSe is not installed
-        produsePath = os.path.dirname(os.path.realpath(__file__))
-    defaultFilt = os.path.join(produsePath, "default_filter.pkl")
+    try:  # If Dellingr is installed
+        dellingrPath = Dellingr.__path__[0]
+    except NameError:  # i.e. Dellingr is not installed
+        dellingrPath = os.path.dirname(os.path.realpath(__file__))
+    defaultFilt = os.path.join(dellingrPath, "default_filter.pkl")
 
     # To validate the argument type, recreate the parser
     # BUT HERE, INDICATE IF AN ARGUMENT IS REQUIRED OR NOT
-    parser = argparse.ArgumentParser(description="Runs all stages of the ProDuSe pipeline on the designated samples")
+    parser = argparse.ArgumentParser(description="Runs all stages of the Dellingr pipeline on the designated samples")
     parser.add_argument("-c", "--config", metavar="INI", default=None, type=lambda x: isValidFile(x, parser),
                         help="A configuration file, specifying one or more arguments. Overriden by command line parameters")
     parser.add_argument("-d", "--outdir", metavar="DIR", default="." + os.sep,
@@ -207,8 +207,8 @@ def checkArgs(rawArgs):
                         help="Path to bwa executable")
     parser.add_argument("--samtools", default="samtools", type=lambda x: isValidFile(x, parser, default="samtools"),
                         help="Path to samtools executable")
-    parser.add_argument("--directory_name", default="produse_analysis_directory",
-                        help="Default output directory name. The results of running the pipeline will be placed in this directory [Default: \'produse_analysis_directory\']")
+    parser.add_argument("--directory_name", default="dellingr_analysis_directory",
+                        help="Default output directory name. The results of running the pipeline will be placed in this directory [Default: \'dellingr_analysis_directory\']")
     parser.add_argument("--append_to_directory", action="store_true",
                         help="If \'--directory_name\' already exists in the specified output directory, simply append new results to that directory [Default: False]")
     parser.add_argument("--cleanup", action="store_true", help="Remove intermediate files")
@@ -315,8 +315,8 @@ def createLogFile(filePath, args, **toolVer):
 
     with open(filePath, "w") as o:
 
-        # Add the version number of ProDuSe
-        o.write("ProDuSe Version " + __version.__version__ + os.linesep)
+        # Add the version number of ProDuSe/Dellingr
+        o.write("Dellingr Version " + __version.__version__ + os.linesep)
         o.write(os.linesep)
 
         # Add command line parameters
@@ -360,8 +360,8 @@ def checkIndexes(refFasta, bwaExec, samtoolsExec, outDir):
         return refFasta
 
     sys.stderr.write(
-        "\t".join(["PRODUSE-MAIN\t", time.strftime('%X'), "Could not locate all indexes for \'%s\'\n" % refFasta]))
-    sys.stderr.write("\t".join(["PRODUSE-MAIN\t", time.strftime('%X'), "Generating Indexes...\n"]))
+        "\t".join(["DELLINGR-MAIN\t", time.strftime('%X'), "Could not locate all indexes for \'%s\'\n" % refFasta]))
+    sys.stderr.write("\t".join(["DELLINGR-MAIN\t", time.strftime('%X'), "Generating Indexes...\n"]))
 
     # Create a folder to hold the reference data
     refDir = os.path.join(outDir, "RefGenome")
@@ -402,7 +402,7 @@ def checkIndexes(refFasta, bwaExec, samtoolsExec, outDir):
         samtoolsCom = [samtoolsExec, "faidx", newRefFasta]
         subprocess.check_call(samtoolsCom)
 
-    sys.stderr.write("\t".join(["PRODUSE-MAIN\t", time.strftime('%X'), "Indexes Generated. Using \'%s\' as the reference genome\n" % newRefFasta]))
+    sys.stderr.write("\t".join(["DELLINGR-MAIN\t", time.strftime('%X'), "Indexes Generated. Using \'%s\' as the reference genome\n" % newRefFasta]))
 
     return newRefFasta
 
@@ -421,7 +421,7 @@ def runPipelineMultithread(args):
 
 def runPipeline(sampleName, sampleDir, cleanup=False):
     """
-    Run all scripts in the ProDuSe pipeline on the specified sample
+    Run all scripts in the ProDuSe/Dellingr pipeline on the specified sample
     :param sampleName: A string containing the sample name, for status message updates
     :param sampleDir: A string containg the filepath to the base sample directory
     :param cleanup: A boolean indicating if temporary files should be deleted
@@ -498,14 +498,14 @@ def runPipeline(sampleName, sampleDir, cleanup=False):
                 "ERROR: Unable to locate a required argument in the bwa config file \'%s\'\n" % (configPath))
             exit(1)
 
-    printPrefix = "PRODUSE-MAIN\t\t"+ sampleName
+    printPrefix = "DELLINGR-MAIN\t\t"+ sampleName
     sys.stderr.write("\t".join([printPrefix, time.strftime('%X'), "Processing Sample \'%s\'\n" % sampleName.rstrip()]))
 
     # Run Trim
     trimDone = os.path.join(sampleDir, "config", "Trim_Complete")  # Similar to Make's "TASK_COMPLETE" file
     if not os.path.exists(trimDone):  # i.e. Did Trim already complete for this sample? If so, do not re-run it
         trimConfig = os.path.join(sampleDir, "config", "trim_task.ini")  # Where is Trim's config file?
-        trimPrintPrefix = "PRODUSE-TRIM\t\t" + sampleName
+        trimPrintPrefix = "DELLINGR-TRIM\t\t" + sampleName
         Trim.main(sysStdin=["--config", trimConfig], printPrefix=trimPrintPrefix)  # Actually run Trim
         open(trimDone,
              "w").close()  # After Trim completes, it will create this file, signifying to the end user that this task completed
@@ -521,7 +521,7 @@ def runPipeline(sampleName, sampleDir, cleanup=False):
     collapseDone = os.path.join(sampleDir, "config", "Collapse_Complete")
     if not os.path.exists(collapseDone):
         collapseConfig = os.path.join(sampleDir, "config", "collapse_task.ini")
-        collapsePrintPrefix = "PRODUSE-COLLAPSE\t" + sampleName
+        collapsePrintPrefix = "DELLINGR-COLLAPSE\t" + sampleName
         Collapse.main(sysStdin=["--config", collapseConfig], printPrefix=collapsePrintPrefix)
         open(collapseDone, "w").close()
 
@@ -529,7 +529,7 @@ def runPipeline(sampleName, sampleDir, cleanup=False):
     clipDone = os.path.join(sampleDir, "config", "Clipoverlap_Complete")
     if not os.path.exists(clipDone):
         clipConfig = os.path.join(sampleDir, "config", "clipoverlap_task.ini")
-        clipPrintPrefix = "PRODUSE-CLIPOVERLAP\t" + sampleName
+        clipPrintPrefix = "DELLINGR-CLIPOVERLAP\t" + sampleName
         ClipOverlap.main(sysStdin=["--config", clipConfig], printPrefix=clipPrintPrefix)
 
         # Sort the clipOverlap output
@@ -552,7 +552,7 @@ def runPipeline(sampleName, sampleDir, cleanup=False):
     pipelineDone = os.path.join(sampleDir, "config", "Pipeline_Complete")
     if not os.path.exists(callDone):
         callConfig = os.path.join(sampleDir, "config", "call_task.ini")
-        callPrintPrefix = "PRODUSE-CALL\t\t" + sampleName
+        callPrintPrefix = "DELLINGR-CALL\t\t" + sampleName
         Call.main(sysStdin=["--config", callConfig], printPrefix=callPrintPrefix)
         open(callDone, "w").close()
 
@@ -569,7 +569,7 @@ def runPipeline(sampleName, sampleDir, cleanup=False):
     sys.stderr.write("\t".join([printPrefix, time.strftime('%X'), "%s: Pipeline Complete\n" % sampleName.rstrip()]))
 
 
-parser = argparse.ArgumentParser(description="Runs all stages of the ProDuSe pipeline on the designated samples")
+parser = argparse.ArgumentParser(description="Runs all stages of the Dellingr pipeline on the designated samples")
 parser.add_argument("-c", "--config", metavar="INI", default=None, type=lambda x: isValidFile(x, parser),
                     help="A configuration file, specifying one or more arguments. Overriden by command line parameters")
 parser.add_argument("--fastqs", metavar="FASTQ", default=None, nargs=2, type=lambda x: isValidFile(x, parser),
@@ -583,7 +583,7 @@ parser.add_argument("-j", "--jobs", metavar="INT", type=int, help="If multiple s
 parser.add_argument("--bwa", help="Path to bwa executable [Default: \'bwa\']")
 parser.add_argument("--samtools", help="Path to samtools executable [Default: \'samtools\']")
 parser.add_argument("--directory_name",
-                    help="Default output directory name. The results of running the pipeline will be placed in this directory [Default: \'produse_analysis_directory\']")
+                    help="Default output directory name. The results of running the pipeline will be placed in this directory [Default: \'dellingr_analysis_directory\']")
 parser.add_argument("--append_to_directory", action="store_true",
                     help="If \'--directory_name\' already exists in the specified output directory, simply append new results to that directory [Default: False]")
 parser.add_argument("--cleanup", action="store_true", help="Remove intermediate files")
@@ -661,7 +661,7 @@ def main(args=None, sysStdin=None):
     samtoolsVer = checkCommand("samtools", args["samtools"], minVer="1.3.1")
     pythonVer = sys.version
 
-    printPrefix = "PRODUSE-MAIN\t"
+    printPrefix = "DELLINGR-MAIN\t"
     sys.stderr.write("\t".join([printPrefix, time.strftime('%X'), "Starting..." + "\n"]))
 
     # Next, let's configure a base output directory for the analysis
@@ -677,7 +677,7 @@ def main(args=None, sysStdin=None):
         os.mkdir(baseOutDir)
 
     # Create a log file specifying the command line parameters
-    logFileName = baseOutDir + os.sep + "ProDuSe_task.log"
+    logFileName = baseOutDir + os.sep + "Dellingr_task.log"
     createLogFile(logFileName, args, bwa=bwaVer, samtools=samtoolsVer, python=pythonVer)
 
     # Finally, organize samples and prepare to run the entire pipeline on each sample
@@ -700,7 +700,7 @@ def main(args=None, sysStdin=None):
 
     # Setup each sample
     samplesToProcess = {}
-    barcodeWarned = False
+
     for sample, sampleArgs in samples.items():
         # Override the existing arguments with any sample-specific arguments
         runArgs = args.copy()
@@ -725,9 +725,7 @@ def main(args=None, sysStdin=None):
         # If a barcode was not specified, estimate it using adapter_predict
         # Note that this will end catastrophically if the sample is multiplexed
         if runArgs["barcode_sequence"] is None:
-            if not barcodeWarned:
-                sys.stderr.write("\t".join([printPrefix, time.strftime('%X'), "Predicting Barcode Sequences...\n"]))
-                barcodeWarned = True
+            sys.stderr.write("\t".join([printPrefix, time.strftime('%X'), "Predicting Barcode Sequences...\n"]))
             adapterPredictArgs = ["--max_barcode_length", str(len(runArgs["barcode_position"])), "--input"]
             adapterPredictArgs.extend(runArgs["fastqs"])
             runArgs["barcode_sequence"] = AdapterPredict.main(sysStdin=adapterPredictArgs, supressOutput=True)

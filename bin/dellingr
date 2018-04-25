@@ -1,23 +1,23 @@
 #! /usr/bin/env python
 
 import sys
-from ProDuSe import ProdusePipeline, Trim, Collapse, AdapterPredict, ClipOverlap, ResumePipeline, Call, Train, UpdateConfig
+from Dellingr import DellingrPipeline, Trim, Collapse, AdapterPredict, ClipOverlap, ResumePipeline, Call, Train, UpdateConfig
 
 def usage():
     """
-    Prints ProDuSe's usage information to stdout
+    Prints Dellingr's usage information to stdout
     """
 
-    from ProDuSe.__version import __version__
-    sys.stdout.write("\nProDuSe: Variant Caller for semi-degenerate barcoded adapter libraries\n")
+    from Dellingr.__version import __version__
+    sys.stdout.write("\nDellingr: Variant Caller for semi-degenerate barcoded adapter libraries\n")
     sys.stdout.write("Version: " + __version__ + "\n")
     sys.stdout.write("\n")
-    sys.stdout.write("Usage:\tproduse <command> [options]\n")
+    sys.stdout.write("Usage:\tdellingr <command> [options]\n")
     sys.stdout.write("\n")
     sys.stdout.write("Commands:\n")
     sys.stdout.write(" -- Analysis Pipeline\n")
-    sys.stdout.write("    run_produse\t\tRuns all stages of the ProDuSe Pipeline\n")
-    sys.stdout.write("    resume_produse\tResumes a previous terminated \"run_produse\"\n")
+    sys.stdout.write("    run_dellingr\tRuns all stages of the ProDuSe Pipeline\n")
+    sys.stdout.write("    resume_dellingr\tResumes a previous terminated \"run_produse\"\n")
     sys.stdout.write("\n")
     sys.stdout.write(" -- Pipeline Components\n")
     sys.stdout.write("    trim\t\tTrims off barcodes from raw reads\n")
@@ -26,7 +26,7 @@ def usage():
     sys.stdout.write("    call\t\tIdentifies and filters variants\n")
     sys.stdout.write("\n")
     sys.stdout.write(" -- Miscellaneous\n")
-    sys.stdout.write("    update_config\tUpdates an older ProDuSe configuration file\n")
+    sys.stdout.write("    update_config\tUpdates an older ProDuSe/Dellingr configuration file\n")
     sys.stdout.write("    adapter_predict\tIdentifies the degerate barcode used in a set of FASTQ files\n")
     sys.stdout.write("    train\t\tTrains the variant calling filter using a set of validated variants\n")
     sys.stdout.write("\n")
@@ -46,9 +46,9 @@ def main(args):
          AdapterPredict.main(sysStdin=args[2:])
     elif command == "update_config":
         UpdateConfig.main(sysStdin=args[2:])
-    elif command == "run_produse":
-        ProdusePipeline.main(sysStdin=args[2:])
-    elif command == "resume_produse":
+    elif command == "run_produse" or command == "run_dellingr":
+        DellingrPipeline.main(sysStdin=args[2:])
+    elif command == "resume_produse" or command == "resume_dellingr":
         ResumePipeline.main(sysStdin=args[2:])
     elif command == "trim":
         Trim.main(sysStdin=args[2:])

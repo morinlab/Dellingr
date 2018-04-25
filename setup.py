@@ -4,7 +4,7 @@ from setuptools import setup, find_packages
 import re
 
 # Imports version number
-VERSIONFILE = "ProDuSe/__version.py"
+VERSIONFILE = "Dellingr/__version.py"
 verstrline = open(VERSIONFILE, "rt").read()
 verRegex = r"^__version__ = ['\"]([^'\"]*)['\"]"
 currentVer = re.search(verRegex, verstrline, re.M)
@@ -14,14 +14,14 @@ else:
     version = "Unknown"
 
 setup(
-    name='ProDuSe',
+    name='Dellingr',
     version=version,
-    description='Process Duplex Sequence Data',
+    description='Error Supression and Variant Calling pipeline for barcoded adapter libraries',
     author='Christopher Rushton',
     author_email='ckrushto@sfu.ca',
     include_package_data=True,
-    packages=["ProDuSe"],
-    url='https://github.com/morinlab/ProDuSe',
+    packages=["Dellingr"],
+    url='https://github.com/morinlab/Dellingr',
     classifiers=[
        "Programming Language :: Python :: 3"
        ],
@@ -36,10 +36,10 @@ setup(
         "packaging",
         "sklearn"
         ],
-    download_url="https://github.com/morinlab/ProDuSe/dist/ProDuSe-0.9.1.tar.gz",
+    download_url="https://github.com/morinlab/Dellingr/dist/Dellingr-0.9.1.tar.gz",
     license="GNU GPLv3",
-    scripts=["bin/produse"],
-    data_files = [("ProDuSe", ["LICENSE.txt", "README.md", "etc/default_filter.pkl"])],
+    scripts=["bin/dellingr"],
+    data_files = [("Dellingr", ["LICENSE.txt", "README.md", "etc/default_filter.pkl"])],
     zip_safe = False
 )
 

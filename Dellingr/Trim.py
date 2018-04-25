@@ -92,7 +92,7 @@ parser.add_argument("--no_trim", action="store_true", help="Instead, output entr
 parser.add_argument("--trim_other_end", action="store_true", help="In addition, examine the other end of the read for a barcode. Will not remove partial barcodes")
 
 
-def main(args=None, sysStdin=None, printPrefix="PRODUSE-TRIM\t"):
+def main(args=None, sysStdin=None, printPrefix="DELLINGR-TRIM\t"):
     IUPACCodeDict = {
         'A': {'A'},  # Adenine
         'C': {'C'},  # Cytosine

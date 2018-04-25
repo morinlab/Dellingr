@@ -1307,7 +1307,7 @@ def main(args=None, sysStdin=None, printPrefix="PRODUSE-COLLAPSE"):
         command += " --" + argument
         if not isinstance(parameter, bool):
             command += " " + str(parameter)
-    header["PG"].append({"ID": "PRODUSE-COLLAPSE", "PN": "ProDuSe", "CL": command})
+    header["PG"].append({"ID": "DELLINGR-COLLAPSE", "PN": "ProDuSe", "CL": command})
 
     outBAM = pysam.AlignmentFile(args["output"], "wb", template=inBAM, header=header)
 

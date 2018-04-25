@@ -1421,7 +1421,7 @@ parser.add_argument("--threshold", metavar="FLOAT", type=float, help="Classifica
 parser.add_argument("--min_alt_depth", metavar="INT", type=int, help="Minimum number of variant reads required to even consider a variant as possibly real [Default: 2]")
 
 
-def main(args=None, sysStdin=None, printPrefix="PRODUSE-CALL\t"):
+def main(args=None, sysStdin=None, printPrefix="DELLINGR-CALL\t"):
     if args is None:
         if sysStdin is None:
             args = parser.parse_args()

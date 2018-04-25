@@ -10,7 +10,7 @@ import random
 from sklearn.ensemble import RandomForestClassifier
 from configobj import ConfigObj
 try:
-    from ProDuSe import Call
+    from Dellingr import Call
 except ImportError:  # i.e. ProDuSe is not installed
     import Call
 
@@ -153,7 +153,7 @@ parser.add_argument("-t", "--targets", metavar="BED", type=lambda x: isValidFile
 parser.add_argument("--true_stats", metavar="TSV", type=lambda x: isValidFile(x, parser), help="An optional file to dump stats coresponding to validated variants")
 parser.add_argument("--false_stats", metavar="TSV", type=lambda x: isValidFile(x, parser), help="An optional file to dump stats coresponding to false variants that were chosen to train the filter")
 
-def main(args=None, sysStdin=None, printPrefix="PRODUSE-TRAIN\t"):
+def main(args=None, sysStdin=None, printPrefix="DELLINGR-TRAIN\t"):
     if args is None:
         args = parser.parse_args(args=sysStdin)
         args = vars(args)
