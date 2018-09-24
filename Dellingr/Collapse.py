@@ -9,10 +9,13 @@ import collections
 import time
 import bisect
 from packaging import version
-from skbio import alignment
+from skbio.alignment import StripedSmithWaterman
 from pyfaidx import Fasta
 from configobj import ConfigObj
-
+try:
+    import DellingrExceptions as pe
+except ImportError:  # Check if Dellingr is installed
+    from Dellingr import DellingrExceptions as pe
 
 class Family:
     """
@@ -47,9 +50,9 @@ class Family:
         # Obtain the family name for this read pair (from the barcode)
         self.invalidBarcode = False
         try:
-            self.familyName = R1.get_tag("BC")
+            self.familyName = R1.get_tag("OX")
             if len(self.familyName) != barcodeLength:
-                self.invalidBarcode = True
+                raise TypeError("The read pair barcode \'%s\' for pair \'%s\' is not compatible with the specified mask" % (self.familyName, R1.query_name))
         except KeyError:
             self.familyName = None
             self.invalidBarcode = True
@@ -178,7 +181,7 @@ class Family:
             refEnd = readWindowStart + 4500
             refName = read.reference_name
             refWindow = refGenome[refName][refStart:refEnd].seq.upper()
-            refAlignment = alignment.StripedSmithWaterman(query_sequence=refWindow)
+            refAlignment = StripedSmithWaterman(query_sequence=refWindow)
 
         # Create a reference alignment object
         mapping = refAlignment(read.query_sequence)
@@ -539,13 +542,15 @@ class Family:
 
         self.R1.query_name = self.name
         self.R1.reference_start = self.R1start
-        if tagOrig:
-            self.R1.set_tag("Zm", ",".join(self.members))
-
         self.R2.query_name = self.name
         self.R2.reference_start = self.R2start
         if tagOrig:
+            self.R1.set_tag("Zm", ",".join(self.members))
             self.R2.set_tag("Zm", ",".join(self.members))
+
+        # Remove the barcode tag, as it is no longer required
+        self.R1.set_tag("OX", None)
+        self.R2.set_tag("OX", None)
 
         # Un-reverse the sequence of the reverse-strand-mapped, so the sequences will be in the expected format
         if self.R1.is_reverse:
@@ -569,6 +574,9 @@ class Family:
         self.R1.next_reference_start = self.R2.reference_start
         self.R2.next_reference_start = self.R1.reference_start
 
+        # Update the mate cigar string
+        self.R1.set_tag("MC", self.R2.cigarstring)
+        self.R2.set_tag("MC", self.R1.cigarstring)
 
 
 class Position:
@@ -847,7 +855,7 @@ class FamilyCoordinator:
     """
 
     def __init__(self, inputFile, reference, familyIndices, familyThreshold, duplexIndices, duplexThreshold,
-                 barcodeLength, targets=None, tagOrig = False, baseBuffer=400, padding=10, printPrefix="PRODUSE-COLLAPSE"):
+                 barcodeLength, targets=None, tagOrig = False, baseBuffer=400, padding=10, printPrefix="DELLINGR-COLLAPSE"):
         self.inFile = inputFile
         self.tagOrig = tagOrig
 
@@ -1017,7 +1025,8 @@ class FamilyCoordinator:
                     # As a sanity check, ensure that the new position is greater than the previous position
                     # (unless we have switched chromosomes)
                     # If it's not, then the input BAM file is unsorted
-                    assert self._previousPos + self._baseBuffer < currentPos or currentChrom != self._previousChr
+                    if self._previousPos + self._baseBuffer > currentPos and currentChrom == self._previousChr:
+                        raise pe.UnsortedInputException("Input BAM/SAM/CRAM file does not appear to be sorted")
 
                     # Identify all previous positions that are to be processed
                     # If we have switched chromosomes, purge everything, as no more reads are coming which map to the
@@ -1042,10 +1051,12 @@ class FamilyCoordinator:
                                 readPair.toPysam(self.tagOrig)
                                 yield readPair.R1
                                 yield readPair.R2
+                                self.familyCounter += 1
                             for readPair in posToProcess.negFamilies.values():
                                 readPair.toPysam(self.tagOrig)
                                 yield readPair.R1
                                 yield readPair.R2
+                                self.familyCounter += 1
                         i -= 1
 
                     self._previousChr = currentChrom
@@ -1064,7 +1075,7 @@ class FamilyCoordinator:
                 if self.pairCounter % 100000 == 0:
                     sys.stderr.write(
                         "\t".join(
-                            [self.printPrefix, time.strftime('%X'), "Pairs Processed:" + str(self.pairCounter) + "\n"]))
+                            [self.printPrefix, time.strftime('%X'), "Collapsed " + str(self.pairCounter) + " reads into " + str(self.familyCounter) + " families" + os.linesep]))
 
                 # Delete the mate from the dictionary to free up space
                 del self._waitingForMate[read.query_name]
@@ -1134,7 +1145,7 @@ class FamilyCoordinator:
 
             # Print out a status (or error) message, briefly summarizing the overall collapse
             if self.missingBarcode > 0 and self.familyCounter == 0:
-                sys.stderr.write("ERROR: Unable to find a \'BC\' tag, which contains the degenerate barcode, for any read in the input BAM file\n")
+                sys.stderr.write("ERROR: Unable to find a \'OX\' tag, which contains the degenerate barcode, for any read in the input BAM file\n")
                 sys.stderr.write(
                     "Check that BWA was run using the \'-C\' option\n")
 
@@ -1142,7 +1153,7 @@ class FamilyCoordinator:
                 sys.stderr.write("ERROR: The input BAM file is empty!")
             else:
                 sys.stderr.write(
-                    "\t".join([self.printPrefix, time.strftime('%X'), "Pairs Processed:" + str(self.pairCounter) + "\n"]))
+                    "\t".join([self.printPrefix, time.strftime('%X'), "Collapsed " + str(self.pairCounter) + " reads into " + str(self.familyCounter) + " families" + os.linesep]))
                 sys.stderr.write("\t".join([self.printPrefix, time.strftime('%X'), "Collapse Complete\n"]))
 
 
@@ -1241,7 +1252,7 @@ parser.add_argument("-t", "--targets", type=lambda x: isValidFile(x, parser),
                     help="A BED file listing targets of interest")
 
 
-def main(args=None, sysStdin=None, printPrefix="PRODUSE-COLLAPSE"):
+def main(args=None, sysStdin=None, printPrefix="DELLINGR-COLLAPSE"):
 
     if args is None:
         if sysStdin is None:
@@ -1292,22 +1303,23 @@ def main(args=None, sysStdin=None, printPrefix="PRODUSE-COLLAPSE"):
     # As of pysam V0.14.0, the header is now managed using an AlignmentHeader class.
     # Thus, support both approaches
     if version.parse(pysam.__version__) >= version.parse("0.14.0"):
-        raise NotImplementedError("Pysam version 0.14.0 and above are currently not supported.")
+        header = inBAM.header.as_dict()
+    else:
+        header = inBAM.header
 
     # Add this command (collapse) to the BAM header
-    header = inBAM.header
     if "PG" not in header:
         header["PG"] = []
 
     # Format the input command in such a way that it can be added to the header (i.e. follow BAM specifications)
-    command = "produse collapse"
+    command = "dellingr collapse"
     for argument, parameter in args.items():
         if not parameter:
             continue
         command += " --" + argument
         if not isinstance(parameter, bool):
             command += " " + str(parameter)
-    header["PG"].append({"ID": "DELLINGR-COLLAPSE", "PN": "ProDuSe", "CL": command})
+    header["PG"].append({"ID": "DELLINGR-COLLAPSE", "PN": "DELLINGR", "CL": command})
 
     outBAM = pysam.AlignmentFile(args["output"], "wb", template=inBAM, header=header)
 

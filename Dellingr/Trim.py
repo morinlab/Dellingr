@@ -183,10 +183,6 @@ def main(args=None, sysStdin=None, printPrefix="DELLINGR-TRIM\t"):
         reverseBarcode = barcodeBases[::-1]
         reverseBarcode = tuple(compliment[x] for x in reverseBarcode)
 
-    # Check to ensure that the user actually provided positions to be compared
-    if len(barcodeIndexes) == 0:
-        parser.error("The barcode mask \'%s\' was provided, and no positions were specified to be compared")
-
     # Open the input and output fastq files for reading/writing
     # Determine if the input files are gzipped, and open appropriately
     if args["input"][0].split(".")[-1] == "gz":
@@ -254,8 +250,8 @@ def main(args=None, sysStdin=None, printPrefix="DELLINGR-TRIM\t"):
 
             # Remove the Illumina tag from the reads, since BWA's -C option will add that tag to the BAM file as well
             # which will corrupt the output SAM
-            r1name = r1name.split(" ")[0].rstrip() + "\tBC:Z:" + familyBarcode + os.linesep
-            r2name = r2name.split(" ")[0].rstrip() + "\tBC:Z:" + familyBarcode + os.linesep
+            r1name = r1name.split(" ")[0].rstrip() + "\tOX:Z:" + familyBarcode + os.linesep
+            r2name = r2name.split(" ")[0].rstrip() + "\tOX:Z:" + familyBarcode + os.linesep
 
             # Second, determine if the barcode sequences fall within the mismatch theshold
             # Obtain the positions that will actually be compared

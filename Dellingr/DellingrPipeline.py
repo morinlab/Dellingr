@@ -39,7 +39,7 @@ def isValidFile(file, parser, default=None):
     elif os.path.exists(file):
         return file
     else:
-        raise parser.error("Unable to locate \'%s\'. Please ensure the file exists, and try again." % (file))
+        raise parser.error("Unable to locate \'%s\': No such file or directory" % (file))
 
 
 def makeConfig(configName, configPath, arguments):
@@ -65,11 +65,8 @@ def configureOutput(sampleName, sampleParameters, outDir, argsToScript, printPre
     # as it likely has already been processed (at least partially)
     samplePath = outDir + os.sep + sampleName
     if os.path.exists(samplePath):
-        sys.stderr.write("\t".join([printPrefix, time.strftime('%X'),
-                                    "WARNING: A folder corresponding to \'%s\' already exists inside \'%s\'\n" % (
-                                    sampleName, outDir)]))
-        sys.stderr.write(
-            "We are not going to process the existing sample, but we will try to finish running the existing sample\n")
+        sys.stderr.write("WARNING: A folder corresponding to \'%s\' already exists inside \'%s\'.\n" % (sampleName, outDir))
+        sys.stderr.write("We will attempt to finish analyzing this sample using the existing configuration.\n")
         return samplePath
 
     os.mkdir(samplePath)
@@ -92,8 +89,7 @@ def configureOutput(sampleName, sampleParameters, outDir, argsToScript, printPre
     bwaR2In = tmpDir + sampleName + ".trim_R2.fastq.gz"
     bwaOut = tmpDir + sampleName + ".trim.bam"
     collapseOut = tmpDir + sampleName + ".collapse.bam"
-    clipUnsortedOut = tmpDir + sampleName + ".clipO.bam"
-    clipSortedOut = resultsDir + sampleName + ".clipO.sort.bam"
+    collapseSortedOut = resultsDir + sampleName + ".collapse.sort.bam"
     callPassedOut = resultsDir + sampleName + ".call.passed.vcf"
     callAllOut = resultsDir + sampleName + ".call.all.vcf"
 
@@ -102,8 +98,7 @@ def configureOutput(sampleName, sampleParameters, outDir, argsToScript, printPre
     scriptToArgs["bwa"] = {"input": [bwaR1In, bwaR2In], "output": bwaOut, "reference": sampleParameters["reference"]}
     scriptToArgs["trim"] = {"input": sampleParameters["fastqs"], "output": [bwaR1In, bwaR2In]}
     scriptToArgs["collapse"] = {"input": bwaOut, "output": collapseOut}
-    scriptToArgs["clipoverlap"] = {"input": collapseOut, "output": clipUnsortedOut, "tag_origin": "True"}
-    scriptToArgs["call"] = {"input": clipSortedOut, "output": callPassedOut, "unfiltered": callAllOut}
+    scriptToArgs["call"] = {"input": collapseSortedOut, "output": callPassedOut, "unfiltered": callAllOut}
 
     for argument, scripts in argsToScript.items():
 
@@ -186,51 +181,48 @@ def checkArgs(rawArgs):
         dellingrPath = os.path.dirname(os.path.realpath(__file__))
     defaultFilt = os.path.join(dellingrPath, "default_filter.pkl")
 
+    # Did the user specify no_barcodes? if so, we don't need a lot of the arguments that the pipeline would normally
+    # require, as we will set some defaults later
+    if rawArgs["no_barcodes"] is True or rawArgs["no_barcodes"] == "True":
+        barParamReq = False
+    else:
+        barParamReq = True
+
     # To validate the argument type, recreate the parser
     # BUT HERE, INDICATE IF AN ARGUMENT IS REQUIRED OR NOT
-    parser = argparse.ArgumentParser(description="Runs all stages of the Dellingr pipeline on the designated samples")
+    parser = argparse.ArgumentParser(description="Runs all stages of the Dellingr pipeline on the designated sample(s)")
     parser.add_argument("-c", "--config", metavar="INI", default=None, type=lambda x: isValidFile(x, parser),
                         help="A configuration file, specifying one or more arguments. Overriden by command line parameters")
     parser.add_argument("-d", "--outdir", metavar="DIR", default="." + os.sep,
                         help="Output directory for analysis directory")
     parser.add_argument("-r", "--reference", metavar="FASTA", required=True,
                         help="Reference genome, in FASTA format. BWA indexes should be present in the same directory")
-    parser.add_argument("-j", "--jobs", metavar="INT", type=int, default=1,
-                        help="If multiple samples are specified (using \'-sc\'), how many samples will be processed in parallel")
+    parser.add_argument("--no_barcodes", action="store_true", help="Does not use semi-degenerate barcoded adapters")
     inputFiles = parser.add_mutually_exclusive_group(required=True)
     inputFiles.add_argument("--fastqs", metavar="FASTQ", default=None, nargs=2,
                             type=lambda x: isValidFile(x, parser), help="Two paired end FASTQ files")
     inputFiles.add_argument("-sc", "--sample_config", metavar="INI", default=None,
                             type=lambda x: isValidFile(x, parser),
                             help="A sample cofiguration file, specifying one or more samples")
-    parser.add_argument("--bwa", default="bwa", type=lambda x: isValidFile(x, parser, default="bwa"),
-                        help="Path to bwa executable")
-    parser.add_argument("--samtools", default="samtools", type=lambda x: isValidFile(x, parser, default="samtools"),
-                        help="Path to samtools executable")
-    parser.add_argument("--directory_name", default="dellingr_analysis_directory",
-                        help="Default output directory name. The results of running the pipeline will be placed in this directory [Default: \'dellingr_analysis_directory\']")
-    parser.add_argument("--append_to_directory", action="store_true",
-                        help="If \'--directory_name\' already exists in the specified output directory, simply append new results to that directory [Default: False]")
-    parser.add_argument("--cleanup", action="store_true", help="Remove intermediate files")
 
     trimArgs = parser.add_argument_group("Arguments used when Trimming barcodes")
     trimArgs.add_argument("-b", "--barcode_sequence", metavar="NNNWSMRWSYWKMWWT", type=str,
                           help="The sequence of the degenerate barcode, represented in IUPAC bases")
-    trimArgs.add_argument("-p", "--barcode_position", metavar="0001111111111110", required=True, type=str,
+    trimArgs.add_argument("-p", "--barcode_position", metavar="0001111111111110",  type=str, required=barParamReq,
                           help="Barcode positions to use when comparing expected and actual barcode sequences (1=Yes, 0=No)")
-    trimArgs.add_argument("-mm", "--max_mismatch", metavar="INT", type=int, required=True,
+    trimArgs.add_argument("-mm", "--max_mismatch", metavar="INT", type=int, required=barParamReq,
                           help="The maximum number of mismatches permitted between the expected and actual barcode sequences [Default: 3]")
     trimArgs.add_argument("--trim_other_end", action="store_true",
                         help="In addition, examine the other end of the read for a barcode. Will not remove partial barcodes")
 
     collapseArgs = parser.add_argument_group("Arguments used when Collapsing families into a consensus")
-    collapseArgs.add_argument("-fm", "--family_mask", metavar="0001111111111110", type=str, required=True,
+    collapseArgs.add_argument("-fm", "--family_mask", metavar="0001111111111110", type=str, required=barParamReq,
                               help="Positions to consider when identifying reads are members of the same family. Usually the same as \'-b\'")
-    collapseArgs.add_argument("-fmm", "--family_mismatch", metavar="INT", type=int, required=True,
+    collapseArgs.add_argument("-fmm", "--family_mismatch", metavar="INT", type=int, required=barParamReq,
                               help="Maximum number of mismatches allowed between two barcodes before they are considered as members of different families")
-    collapseArgs.add_argument("-dm", "--duplex_mask", metavar="0000000001111110", type=str, required=True,
+    collapseArgs.add_argument("-dm", "--duplex_mask", metavar="0000000001111110", type=str, required=barParamReq,
                               help="Positions to consider when determining if two families are in duplex")
-    collapseArgs.add_argument("-dmm", "--duplex_mismatch", metavar="INT", type=int, required=True,
+    collapseArgs.add_argument("-dmm", "--duplex_mismatch", metavar="INT", type=int, required=barParamReq,
                               help="Maximum number of mismatches allowed between two barcodes before they are classified as not in duplex")
     collapseArgs.add_argument("-t", "--targets", metavar="BED", type=lambda x: isValidFile(x, parser),
                               help="A BED file containing capture regions of interest. Read pairs that do not overlap these regions will be filtered out")
@@ -240,10 +232,24 @@ def checkArgs(rawArgs):
     callArgs = parser.add_argument_group("Arguments used when calling variants")
     callArgs.add_argument("-f", "--filter", metavar="PICKLE", type=lambda x: isValidFile(x, parser), default=defaultFilt,
                           help="A python pickle containing a trained Random Forest variant filter")
-    callArgs.add_argument("--threshold", metavar="FLOAT", type=float, default=0.33,
-                          help="Classifier threshold to use when filtering variants. Decrease to be more lenient [Default: 0.33]")
+    callArgs.add_argument("--threshold", metavar="FLOAT", type=float, default=0.65,
+                          help="Classifier threshold to use when filtering variants. Decrease to be more lenient [Default: 0.65]")
+
+    miscArgs = parser.add_argument_group("Miscellaneous Args")
+    miscArgs.add_argument("-j", "--jobs", metavar="INT", type=int, default=1,
+                        help="If multiple samples are specified (using \'-sc\'), how many samples will be processed in parallel")
+    miscArgs.add_argument("--bwa", default="bwa", type=lambda x: isValidFile(x, parser, default="bwa"),
+                        help="Path to bwa executable")
+    miscArgs.add_argument("--samtools", default="samtools", type=lambda x: isValidFile(x, parser, default="samtools"),
+                        help="Path to samtools executable")
+    miscArgs.add_argument("--directory_name", default="dellingr_analysis_directory",
+                        help="Default output directory name. The results of running the pipeline will be placed in this directory [Default: \'dellingr_analysis_directory\']")
+    miscArgs.add_argument("--append_to_directory", action="store_true",
+                        help="If \'--directory_name\' already exists in the specified output directory, simply append new results to that directory [Default: False]")
+    miscArgs.add_argument("--cleanup", action="store_true", help="Remove intermediate files")
 
     validatedArgs = parser.parse_args(args=listArgs)
+
     return vars(validatedArgs)
 
 
@@ -315,18 +321,24 @@ def createLogFile(filePath, args, **toolVer):
 
     with open(filePath, "w") as o:
 
-        # Add the version number of ProDuSe/Dellingr
-        o.write("Dellingr Version " + __version.__version__ + os.linesep)
+        # Add the version number of Dellingr
+        o.write("# Dellingr Version " + __version.__version__ + os.linesep)
+        o.write(os.linesep)
+
+        # Add a status message explaining that this log file can actually be used as a configuration file
+        o.write("# This log file can be used as a Dellingr configuration file to repeat this analysis" + os.linesep)
+        o.write("[Pipeline]")
+        o.write(os.linesep)
         o.write(os.linesep)
 
         # Add command line parameters
         for argument, parameter in args.items():
-            o.write(str(argument) + ": " + str(parameter) + os.linesep)
+            o.write(str(argument) + "=" + str(parameter) + os.linesep)
         o.write(os.linesep)
 
         # Add tool version numbers
         for tool, version in toolVer.items():
-            o.write(str(tool) + ": " + str(version) + os.linesep)
+            o.write("# " + str(tool) + ": " + str(version.replace("\n", " ")) + os.linesep)
         o.write(os.linesep)
 
 
@@ -421,7 +433,7 @@ def runPipelineMultithread(args):
 
 def runPipeline(sampleName, sampleDir, cleanup=False):
     """
-    Run all scripts in the ProDuSe/Dellingr pipeline on the specified sample
+    Run all scripts in the Dellingr pipeline on the specified sample
     :param sampleName: A string containing the sample name, for status message updates
     :param sampleDir: A string containg the filepath to the base sample directory
     :param cleanup: A boolean indicating if temporary files should be deleted
@@ -484,11 +496,11 @@ def runPipeline(sampleName, sampleDir, cleanup=False):
             sortCom.wait()
 
             if bwaCom.returncode != 0 or sortCom.returncode != 0:  # i.e. Something crashed
-                sys.stderr.write("ERROR: BWA or Samtools encountered an unexpected error and were terminated\n")
+                sys.stderr.write("ERROR: BWA and Samtools encountered an unexpected error and were terminated\n")
                 sys.stderr.write("BWA Standard Error Stream:\n")
-                sys.stderr.write("\n".join(bwaStderr))
+                sys.stderr.write(os.linesep.join(bwaStderr))
                 sys.stderr.write("Samtools Sort Standard Error Stream:\n")
-                sys.stderr.write("\n".join(samtoolsStderr))
+                sys.stderr.write(os.linesep.join(samtoolsStderr))
                 exit(1)
 
             sys.stderr.write("\t".join([printPrefix, time.strftime('%X'), "Mapping Complete\n"]))
@@ -497,6 +509,54 @@ def runPipeline(sampleName, sampleDir, cleanup=False):
             sys.stderr.write(
                 "ERROR: Unable to locate a required argument in the bwa config file \'%s\'\n" % (configPath))
             exit(1)
+
+
+    def sortAndRetag(inFile, outFile, bwaConfigPath):
+        """
+        Recalculare the MD and NM tags of the secified SAM file, and sort it
+
+        :param inFile: A string containing a filepath to an input BAM file. Usually generated by clipOverlap
+        :param outFile: A string containing an output filepath
+        :param bwaConfigPath: A string containing a filepath to the BWA config file
+        :return:
+        """
+
+        # Parse the reference genome location from the BWA config file
+        bwaConfig = ConfigObj(bwaConfigPath)["bwa"]
+        refGenome = bwaConfig["reference"]
+
+        calmdCom = ["samtools", "calmd", inFile, refGenome, "-b"]  # Recalculate MD and NM tags
+        sortCom = ["samtools", "sort", "-o", outFile]
+
+        # To cleanup the terminal, we are going to buffer the stderr stream of every process into a variable
+        # If a samtools task crashes (exit code != 0), we will print out everything that is buffered
+        calmdStderr = []
+        sortStderr = []
+
+        calmdTask = subprocess.Popen(calmdCom, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        sortTask = subprocess.Popen(sortCom, stdin=calmdTask.stdout, stderr=subprocess.PIPE)
+
+        # Parse through the stderr lines of samtools, and buffer them as necessary
+        for calmdLine in calmdTask.stderr:
+            calmdStderr.append(calmdLine.decode("utf-8"))
+
+        for sortLine in sortTask.stderr:
+            sortStderr.append(sortLine.decode("utf-8"))
+
+        calmdTask.stdout.close()
+        calmdTask.wait()
+        sortTask.wait()
+
+        if calmdTask.returncode != 0 or sortTask.returncode != 0:  # i.e. Something crashed
+            sys.stderr.write("ERROR: Samtools encountered an unexpected error and was terminated\n")
+            sys.stderr.write("Samtools calmd Standard Error Stream:\n")
+            sys.stderr.write("\n".join(calmdStderr))
+            sys.stderr.write("Samtools Sort Standard Error Stream:\n")
+            sys.stderr.write("\n".join(sortStderr))
+            exit(1)
+
+        # Finally, index the BAM file
+        subprocess.check_call(["samtools", "index", outFile])
 
     printPrefix = "DELLINGR-MAIN\t\t"+ sampleName
     sys.stderr.write("\t".join([printPrefix, time.strftime('%X'), "Processing Sample \'%s\'\n" % sampleName.rstrip()]))
@@ -523,29 +583,21 @@ def runPipeline(sampleName, sampleDir, cleanup=False):
         collapseConfig = os.path.join(sampleDir, "config", "collapse_task.ini")
         collapsePrintPrefix = "DELLINGR-COLLAPSE\t" + sampleName
         Collapse.main(sysStdin=["--config", collapseConfig], printPrefix=collapsePrintPrefix)
-        open(collapseDone, "w").close()
 
-    # Run clipoverlap
-    clipDone = os.path.join(sampleDir, "config", "Clipoverlap_Complete")
-    if not os.path.exists(clipDone):
-        clipConfig = os.path.join(sampleDir, "config", "clipoverlap_task.ini")
-        clipPrintPrefix = "DELLINGR-CLIPOVERLAP\t" + sampleName
-        ClipOverlap.main(sysStdin=["--config", clipConfig], printPrefix=clipPrintPrefix)
-
-        # Sort the clipOverlap output
-        # Parse the clipoverlap config file for the output file name
-        clipConfArgs = ConfigObj(clipConfig)
-        sortInput = clipConfArgs["clipoverlap"]["output"]
+        # Sort the collapse BAM output output
+        # Parse the config file for the output file name
+        collapseConfArgs = ConfigObj(collapseConfig)
+        sortInput = collapseConfArgs["collapse"]["output"]
         # Append "sort" as the output file name
         sortOutput = sortInput.replace(".bam", ".sort.bam")
         tmpDir = os.sep + "tmp" + os.sep
         resultsDir = os.sep + "results" + os.sep
         sortOutput = sortOutput.replace(tmpDir, resultsDir)
-        sortCommand = ["samtools", "sort", sortInput, "-o", sortOutput]
-        sys.stderr.write("\t".join([printPrefix, time.strftime('%X'), "Sorting final BAM file...\n"]))
-        subprocess.check_call(sortCommand)
+        sys.stderr.write("\t".join([printPrefix, time.strftime('%X'), "Sorting final BAM file, and recalculating tags...\n"]))
+        bwaConfig = os.path.join(sampleDir, "config", "bwa_task.ini")
+        sortAndRetag(sortInput, sortOutput, bwaConfig)
 
-        open(clipDone, "w").close()
+        open(collapseDone, "w").close()
 
     # Run call (variant calling)
     callDone = os.path.join(sampleDir, "config", "Call_Complete")
@@ -569,24 +621,17 @@ def runPipeline(sampleName, sampleDir, cleanup=False):
     sys.stderr.write("\t".join([printPrefix, time.strftime('%X'), "%s: Pipeline Complete\n" % sampleName.rstrip()]))
 
 
-parser = argparse.ArgumentParser(description="Runs all stages of the Dellingr pipeline on the designated samples")
+parser = argparse.ArgumentParser(description="Runs all stages of the Dellingr pipeline on the designated sample(s)")
 parser.add_argument("-c", "--config", metavar="INI", default=None, type=lambda x: isValidFile(x, parser),
                     help="A configuration file, specifying one or more arguments. Overriden by command line parameters")
 parser.add_argument("--fastqs", metavar="FASTQ", default=None, nargs=2, type=lambda x: isValidFile(x, parser),
                     help="Two paired end FASTQ files")
-parser.add_argument("-d", "--outdir", metavar="DIR", help="Output directory for analysis directory")
-parser.add_argument("-r", "--reference", metavar="FASTA",
-                    help="Reference genome, in FASTA format. BWA indexes should present in the same directory")
 parser.add_argument("-sc", "--sample_config", metavar="INI", default=None, type=lambda x: isValidFile(x, parser),
                     help="A sample cofiguration file, specifying one or more samples")
-parser.add_argument("-j", "--jobs", metavar="INT", type=int, help="If multiple samples are specified (using \'-sc\'), how many samples will be processed in parallel")
-parser.add_argument("--bwa", help="Path to bwa executable [Default: \'bwa\']")
-parser.add_argument("--samtools", help="Path to samtools executable [Default: \'samtools\']")
-parser.add_argument("--directory_name",
-                    help="Default output directory name. The results of running the pipeline will be placed in this directory [Default: \'dellingr_analysis_directory\']")
-parser.add_argument("--append_to_directory", action="store_true",
-                    help="If \'--directory_name\' already exists in the specified output directory, simply append new results to that directory [Default: False]")
-parser.add_argument("--cleanup", action="store_true", help="Remove intermediate files")
+parser.add_argument("-r", "--reference", metavar="FASTA",
+                    help="Reference genome, in FASTA format. BWA indexes should present in the same directory")
+parser.add_argument("-d", "--outdir", metavar="DIR", help="Output directory for analysis directory")
+parser.add_argument("--no_barcodes", action="store_true", help="Does not use semi-degenerate barcoded adapters")
 
 trimArgs = parser.add_argument_group("Arguments used when Trimming barcodes")
 trimArgs.add_argument("-b", "--barcode_sequence", metavar="NNNWSMRWSYWKMWWT", type=str,
@@ -612,8 +657,18 @@ collapseArgs.add_argument("--tag_family_members", action="store_true",
                           help="Store the names of all reads used to generate a consensus in the tag 'Zm'")
 
 callArgs = parser.add_argument_group("Arguments used when calling variants")
-callArgs.add_argument("--threshold", metavar="FLOAT", type=float, help="Classifier threshold to use when filtering variants. Decrease to be more lenient [Default: 0.33]")
+callArgs.add_argument("--threshold", metavar="FLOAT", type=float, help="Classifier threshold to use when filtering variants. Decrease to be more lenient [Default: 0.65]")
 callArgs.add_argument("-f", "--filter", metavar="PICKLE", type=lambda x:isValidFile(x, parser), help="A python pickle containing a trained Random Forest variant filter")
+
+miscArgs = parser.add_argument_group("Miscellaneous Arguments")
+miscArgs.add_argument("-j", "--jobs", metavar="INT", type=int, help="If multiple samples are specified (using \'-sc\'), how many samples will be processed in parallel")
+miscArgs.add_argument("--bwa", help="Path to bwa executable [Default: \'bwa\']")
+miscArgs.add_argument("--samtools", help="Path to samtools executable [Default: \'samtools\']")
+miscArgs.add_argument("--directory_name",
+                    help="Default output directory name. The results of running the pipeline will be placed in this directory [Default: \'dellingr_analysis_directory\']")
+miscArgs.add_argument("--append_to_directory", action="store_true",
+                    help="If \'--directory_name\' already exists in the specified output directory, simply append new results to that directory [Default: False]")
+miscArgs.add_argument("--cleanup", action="store_true", help="Remove intermediate files")
 
 # For config parsing purposes, assign each parameter to the pipeline component from which it originates
 argsToPipelineComponent = {
@@ -655,7 +710,7 @@ def main(args=None, sysStdin=None):
     # This is done here so that parameters passed from the config file can also be checked
     args = checkArgs(args)
 
-    # Next, lets make sure that ProDuSe's dependencies exist, and they meet the minumum version
+    # Next, lets make sure that Dellingr's dependencies exist, and they meet the minumum version
     # requirements
     bwaVer = checkCommand("bwa", args["bwa"], minVer="0.7.0")
     samtoolsVer = checkCommand("samtools", args["samtools"], minVer="1.3.1")
@@ -700,7 +755,7 @@ def main(args=None, sysStdin=None):
 
     # Setup each sample
     samplesToProcess = {}
-
+    barcodeWarned = False
     for sample, sampleArgs in samples.items():
         # Override the existing arguments with any sample-specific arguments
         runArgs = args.copy()
@@ -725,7 +780,9 @@ def main(args=None, sysStdin=None):
         # If a barcode was not specified, estimate it using adapter_predict
         # Note that this will end catastrophically if the sample is multiplexed
         if runArgs["barcode_sequence"] is None:
-            sys.stderr.write("\t".join([printPrefix, time.strftime('%X'), "Predicting Barcode Sequences...\n"]))
+            if not barcodeWarned:
+                sys.stderr.write("\t".join([printPrefix, time.strftime('%X'), "Predicting Barcode Sequences...\n"]))
+                barcodeWarned = True
             adapterPredictArgs = ["--max_barcode_length", str(len(runArgs["barcode_position"])), "--input"]
             adapterPredictArgs.extend(runArgs["fastqs"])
             runArgs["barcode_sequence"] = AdapterPredict.main(sysStdin=adapterPredictArgs, supressOutput=True)
@@ -759,7 +816,7 @@ def main(args=None, sysStdin=None):
         multithreadArgs = list((x.ljust(maxLength, " "), y, args["cleanup"]) for x, y in samplesToProcess.items())
         try:
             # Run the jobs
-            processPool.map(runPipelineMultithread, multithreadArgs)
+            processPool.map_async(runPipelineMultithread, multithreadArgs)
             processPool.close()
             processPool.join()
         except KeyboardInterrupt as e:
