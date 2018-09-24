@@ -16,7 +16,7 @@ else:
 setup(
     name='Dellingr',
     version=version,
-    description='Error Supression and Variant Calling pipeline for barcoded adapter libraries',
+    description='Error Supression and variant calling pipeline for barcoded adapter libraries',
     author='Christopher Rushton',
     author_email='ckrushto@sfu.ca',
     include_package_data=True,
@@ -32,9 +32,10 @@ setup(
         "configobj",
         "scikit-bio",
         "pyfaidx",
-        "pysam<=0.13.0",
+        "pysam",
         "packaging",
-        "sklearn"
+        "sklearn",
+        "fisher"
         ],
     download_url="https://github.com/morinlab/Dellingr/dist/Dellingr-0.9.1.tar.gz",
     license="GNU GPLv3",
