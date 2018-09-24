@@ -3,7 +3,8 @@ numpy
 configobj
 scikit-bio
 pyfaidx
-pysam==0.13.0
+pysam
 packaging
 sklearn
 scipy
+fisher

@@ -6,7 +6,7 @@ include Dellingr/__init__.py
 include Dellingr/AdapterPredict.py
 include Dellingr/Collapse.py
 include Dellingr/Trim.py
-include bin/produse
+include bin/dellingr
 include Dellingr/DellingrPipeline.py
 include Dellingr/Call.py
 include Dellingr/ClipOverlap.py
