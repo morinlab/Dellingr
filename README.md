@@ -1,3 +1,5 @@
+[![Build Status](https://travis-ci.org/morinlab/Dellingr.svg?branch=master)](https://travis-ci.org/morinlab/Dellingr)
+
 # Dellingr
 A variant caller designed for use with libraries generated using semi-degenerate barcoded adapters.
 
