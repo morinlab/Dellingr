@@ -1,7 +1,7 @@
 [![Build Status](https://travis-ci.org/morinlab/Dellingr.svg?branch=master)](https://travis-ci.org/morinlab/Dellingr)
 
 # Dellingr
-A variant caller designed for use with libraries generated using semi-degenerate barcoded adapters.
+An error supression and variant calling pipeline for Second-Generation sequencing data
 
 ## Description
 
@@ -11,18 +11,25 @@ See the full wiki page for more information: http://produse.readthedocs.io/en/la
 
 ### Dependencies
 
-You will need to install the following tools before installing the Dellingr package:
+You will need to install the following before installing Dellingr:
 
 * `3.7>python>=3.4`
 * `bwa>=0.7.0`
 * `samtools>=1.3.1`
 
-Dellingr will check that a valid version of these tools are installed prior to running the pipeline
+Dellingr will check these dependencies prior to running the pipeline
 
 To install the Dellingr package run the following command:
 
+### Install using the Python Package Index (PyPI)
 ```bash
-cd path/to/github/clone/Dellingr
+pip install Dellingr
+```
+
+### Install from Github
+```bash
+git clone https://github.com/morinlab/Dellingr.git
+cd Dellingr
 python setup.py install
 ```
 All required python dependencies will be installed during this step
@@ -34,26 +41,26 @@ All required python dependencies will be installed during this step
 You can view more detailed instructions on the [wiki](http://produse.readthedocs.io/en/latest/)
 
 All parameters required to run ProDuSe can be viewed using the following:
-```
-    dellingr run_produse -h
+```bash
+    dellingr run_dellingr -h
 ```
 
 Alternatively, if you wish to run Dellingr without installing it, you can run `DellingrPipeline.py` manually in a similar manner:
-```
-    /path/to/Dellingr/ProdusePipeline.py -h
+```bash
+    /path/to/Dellingr/DellingrPipeline.py -h
 ```
 
 While these parameters can be specified individually, they can also be provided using a configuration file
 
 To run the analysis pipeline you simply need to run the following command:
-```
+```bash
     dellingr run_dellingr
     -c /path/to/github/clone/etc/dellingr_config.ini
 ```
 
 Alternatively:
-```
-    /path/to/ProDuSe/DellingrPipeline.py 
+```bash
+    /path/to/Dellingr/DellingrPipeline.py 
     -c /path/to/github/clone/etc/dellingr_config.ini
 ```
 
