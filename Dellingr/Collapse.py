@@ -1138,10 +1138,12 @@ class FamilyCoordinator:
                         readPair.toPysam(self.tagOrig)
                         yield readPair.R1
                         yield readPair.R2
+                        self.familyCounter += 1
                     for readPair in posToProcess.negFamilies.values():
                         readPair.toPysam(self.tagOrig)
                         yield readPair.R1
                         yield readPair.R2
+                        self.familyCounter += 1
 
             # Print out a status (or error) message, briefly summarizing the overall collapse
             if self.missingBarcode > 0 and self.familyCounter == 0:
