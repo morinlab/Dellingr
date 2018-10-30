@@ -13,34 +13,49 @@ if currentVer:
 else:
     version = "Unknown"
 
+# Read in the README for the long description
+with open("README.md", "r") as fh:
+    long_description = fh.read()
+
 setup(
     name='Dellingr',
     version=version,
-    description='Error Supression and variant calling pipeline for barcoded adapter libraries',
+    description='Error supression and variant calling pipeline for Second-Generation sequencing data',
+    long_description=long_description,
+    long_description_content_type="text/markdown",
     author='Christopher Rushton',
     author_email='ckrushto@sfu.ca',
     include_package_data=True,
     packages=["Dellingr"],
     url='https://github.com/morinlab/Dellingr',
     classifiers=[
-       "Programming Language :: Python :: 3"
+       "Programming Language :: Python :: 3",
+       "Operating System :: Unix",
+       "Topic :: Scientific/Engineering :: Bio-Informatics",
+       "License :: OSI Approved :: GNU Affero General Public License v3"
        ],
     setup_requires=["numpy"],
-    install_requires=[
-        "sortedcontainers",
+    python_requires='>=3.4, <3.7',
+    install_requires=[  # This ordering is very important!!!!!!
+        "fisher",
+        "seaborn",
         "scipy",
+        "sortedcontainers",
         "configobj",
-        "scikit-bio",
         "pyfaidx",
         "pysam",
         "packaging",
-        "sklearn",
-        "fisher"
+        "scikit-learn==0.19.2",
+        "scikit-bio",
+        "numpy==1.13"
         ],
-    download_url="https://github.com/morinlab/Dellingr/dist/Dellingr-0.9.1.tar.gz",
-    license="GNU GPLv3",
+    download_url="https://github.com/morinlab/Dellingr/dist/Dellingr-0.9.4.tar.gz",
     scripts=["bin/dellingr"],
-    data_files = [("Dellingr", ["LICENSE.txt", "README.md", "etc/default_filter.pkl"])],
-    zip_safe = False
+    package_data = {"Dellingr": ["LICENSE.txt", "README.md", "etc/default_filter.pkl"]},
+    zip_safe = False,
+    project_urls={
+        "Source": "https://github.com/morinlab/Dellingr",
+        "Documentation": "https://dellingr.readthedocs.io/en/latest/"
+        }
 )
 

@@ -780,7 +780,7 @@ def main(args=None, sysStdin=None, printPrefix="DELLINGR-CLIPOVERLAP"):
         command += " --" + str(argument)
         if not isinstance(parameter, bool):
             command += " " + str(parameter)
-    header["PG"].append({"ID": "DELLINGR-CLIPOVERLAP", "PN": "DELLINGR", "CL": command})
+    header["PG"].append({"ID": "DELLINGR-CLIPOVERLAP", "PN": "Dellingr", "CL": command})
 
     # If streams were specified as input or output (represented by a pipe symbol), set those
     if args["input"] == "-":

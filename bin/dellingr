@@ -1,7 +1,6 @@
 #! /usr/bin/env python
 
 import sys
-from Dellingr import DellingrPipeline, Trim, Collapse, AdapterPredict, ClipOverlap, ResumePipeline, Call, Train, UpdateConfig
 
 def usage():
     """
@@ -9,24 +8,24 @@ def usage():
     """
 
     from Dellingr.__version import __version__
-    sys.stdout.write("\nDellingr: Variant Caller for semi-degenerate barcoded adapter libraries\n")
+    sys.stdout.write("\nDellingr: Error supression and variant calling pipeline for Illumina sequencing data\n")
     sys.stdout.write("Version: " + __version__ + "\n")
     sys.stdout.write("\n")
     sys.stdout.write("Usage:\tdellingr <command> [options]\n")
     sys.stdout.write("\n")
     sys.stdout.write("Commands:\n")
     sys.stdout.write(" -- Analysis Pipeline\n")
-    sys.stdout.write("    run_dellingr\tRuns all stages of the ProDuSe Pipeline\n")
-    sys.stdout.write("    resume_dellingr\tResumes a previous terminated \"run_produse\"\n")
+    sys.stdout.write("    run_dellingr\tRuns all stages of the Dellingr Pipeline\n")
+    sys.stdout.write("    resume_dellingr\tResumes a previous terminated \"run_dellingr\"\n")
     sys.stdout.write("\n")
     sys.stdout.write(" -- Pipeline Components\n")
     sys.stdout.write("    trim\t\tTrims off barcodes from raw reads\n")
     sys.stdout.write("    collapse\t\tIdentifies duplicates, and merges duplicates into a consensus\n")
-    sys.stdout.write("    clip\t\tGenerates a consensus from overlapping positions within a read pair\n")
     sys.stdout.write("    call\t\tIdentifies and filters variants\n")
     sys.stdout.write("\n")
     sys.stdout.write(" -- Miscellaneous\n")
-    sys.stdout.write("    update_config\tUpdates an older ProDuSe/Dellingr configuration file\n")
+    sys.stdout.write("    clip\t\tGenerates a consensus from overlapping positions within a read pair\n")
+    sys.stdout.write("    update_config\tUpdates an older Dellingr configuration file\n")
     sys.stdout.write("    adapter_predict\tIdentifies the degerate barcode used in a set of FASTQ files\n")
     sys.stdout.write("    train\t\tTrains the variant calling filter using a set of validated variants\n")
     sys.stdout.write("\n")
@@ -43,23 +42,37 @@ def main(args):
     command = args[1]
 
     if command == "adapter_predict":
+         from Dellingr import AdapterPredict
          AdapterPredict.main(sysStdin=args[2:])
     elif command == "update_config":
+        from Dellingr import UpdateConfig
         UpdateConfig.main(sysStdin=args[2:])
-    elif command == "run_produse" or command == "run_dellingr":
+    elif command == "run_dellingr":
+        from Dellingr import DellingrPipeline
         DellingrPipeline.main(sysStdin=args[2:])
-    elif command == "resume_produse" or command == "resume_dellingr":
+    elif command == "resume_dellingr":
+        from Dellingr import ResumePipeline
         ResumePipeline.main(sysStdin=args[2:])
     elif command == "trim":
+        from Dellingr import Trim
         Trim.main(sysStdin=args[2:])
     elif command == "collapse":
+        from Dellingr import Collapse
         Collapse.main(sysStdin=args[2:])
     elif command == "clip" or command == "clipoverlap":
+        from Dellingr import ClipOverlap
         ClipOverlap.main(sysStdin=args[2:])
     elif command == "call":
+        from Dellingr import Call
         Call.main(sysStdin=args[2:])
     elif command == "train":
+        from Dellingr import Train
         Train.main(sysStdin=args[2:])
+    elif command == "version" or command == "--version":
+        from Dellingr.__version import __version__
+        sys.stdout.write(__version__ + "\n")
+    elif command == "--help" or command == "-h":
+        usage()
     else:
         sys.stdout.write("Unrecognized Command: %s\n" % command)
         usage()

@@ -717,13 +717,13 @@ class IndelPos(object):
         for base, reads in readNameBaseIndex.items():
 
             if not reads:  # i.e. the dictionary is empty. There are no values to process
-                self.alleleMapQual[base] = (0)
-                self.alleleBaseQual[base] = (0)
+                self.alleleMapQual[base] = [0]
+                self.alleleBaseQual[base] = [0]
                 self.alleleStrandBias[base] = 1
                 self.alleleVafs[base] = 0
-                self.alleleMismatch[base] = (0)
-                self.alleleAvFamSize[base] = (0)
-                self.alleleEndDist[base] = (0)
+                self.alleleMismatch[base] = [0]
+                self.alleleAvFamSize[base] = [0]
+                self.alleleEndDist[base] = [0]
             else:
                 if base == "ALT":
                     # Is this an insertion? Or deletion
@@ -780,7 +780,7 @@ class IndelPos(object):
 
                 counts = len(reads.values())
                 self.strandCounts[base] = counts
-                self.alleleVafs[base] = counts / depth
+                self.alleleVafs[base] = counts / self.molecDepth
 
                 # Aggregate remaining stats
                 self.alleleMismatch[base] = tuple(self.mismatchNum[x] for x in reads.values())
@@ -888,6 +888,16 @@ class PileupEngine(object):
         # Output vcf genotype fields
         self._genotypeFormat = "DP:AD:ADF:ADR"
 
+    def reset(self):
+        """
+        Resets all positions and buffers back to 0
+        :return:
+        """
+        self._refStart = 0
+        self._chrom = None
+        self._bufferPos = 0
+        self._refWindow = ""
+
     def _loadCaptureSpace(self, file):
         """
         Parse genomic regions from a specified BED file, and load them into a dictionary
@@ -963,11 +973,12 @@ class PileupEngine(object):
             return False
         return True
 
-    def _writeVcfHeader(self, file):
+    def _writeVcfHeader(self, file, filtThreshold):
         """
         Prints a VCF header to the specified file
 
         :param file: A file object, open to writing
+        :param filtThreshold: A float indicating the variant call confidence threshold for the random forest filter
         """
 
         header = ["##fileformat=VCFv4.3",  # Mandatory
@@ -995,17 +1006,21 @@ class PileupEngine(object):
             '##INFO=<ID=STP,Number=R,Type=Float,Description="Probability of Strand Bias during sequencing for each Allele">',
             '##INFO=<ID=PC,Number=R,Type=Integer,Description="Positive Strand Molecule Counts">',
             '##INFO=<ID=NC,Number=R,Type=Integer,Description="Negative Strand Molecule Counts">',
-            '##INFO=<ID=VAF,Number=R,Type=Float,Description="Variant allele fraction of alternate allele(s) at this locus">'
-            '##FILTER=<ID=RandomForest,Description="Confidence that a given variant is real (0=weak, 1=strong)">'
+            '##INFO=<ID=VAF,Number=R,Type=Float,Description="Variant allele fraction of alternate allele(s) at this locus">',
+            '##INFO=<ID=FILT,Number=R,Type=Float,Description="Variant call confidence for alternate allele(s)">',
+            '##FILTER=<ID=PASS,Description="Variant call confidence is above random forest filter confidence threshold %s">' % (filtThreshold),
+            '##FILTER=<ID=LOW_CONF,Description="Variant call confidence is below the random forest filter confidence threshold %s">' % (filtThreshold),
+            '##FILTER=<ID=NO_DUPLEX,Description="Variant does not have duplex support. Only used when the duplex filter is enabled">',
+            '##FILTER=<ID=REPEAT,Description="Variant indel is an expansion or contraction of an adjacent repeat">'
             ])
 
         # Genotype fields
-        header.append('##FORMAT=<ID=DP,Number=1,Type=Integer,Description="Total molecule count">')
-        header.append('##FORMAT=<ID=AD,Number=R,Type=Integer,Description="Total number of molecules supporting each allele">')
-        header.append('##FORMAT=<ID=ADF,Number=R,Type=Integer,Description="Number of reads mapped to the forward strand for each allele">')
-        header.append('##FORMAT=<ID=ADR,Number=R,Type=Integer,Description="Number of reads mapped to the reverse strand for each allele">')
+        header.append('##FORMAT=<ID=DP,Number=1,Type=Integer,Description="Total MOLECULE count">')
+        header.append('##FORMAT=<ID=AD,Number=R,Type=Integer,Description="Total number of MOLECULES supporting each allele">')
+        header.append('##FORMAT=<ID=ADF,Number=R,Type=Integer,Description="Number of READS mapped to the forward strand for each allele">')
+        header.append('##FORMAT=<ID=ADR,Number=R,Type=Integer,Description="Number of READS mapped to the reverse strand for each allele">')
 
-        header.append("\t".join(["#CHROM", "POS", "ID", "REF", "ALT", "QUAL", "FILTER", "INFO", "TUMOR" + os.linesep]))
+        header.append("\t".join(["#CHROM", "POS", "ID", "REF", "ALT", "QUAL", "FILTER", "INFO", "FORMAT", "TUMOR" + os.linesep]))
         file.write(os.linesep.join(header))
 
 
@@ -1060,6 +1075,17 @@ class PileupEngine(object):
         except FloatingPointError:
             fSizeBias = 1
 
+        # Does this mutation indicate DNA damage?
+        # C -> A and G -> T mutations are commonly affiliated with DNA damage
+        try:
+            if (pos.ref == "C" and "A" in pos.altAlleles) or (pos.ref == "G" and "T" in pos.altAlleles):
+                dnaDamageMut = True
+            else:
+                dnaDamageMut = False
+        except AttributeError:  # i.e. this is an indel. This filter does not apply
+            dnaDamageMut = False
+
+
         posStats = (
             pos.strandCounts[allele],
             pos.alleleStrandBias[allele],  # Strand bias pVal
@@ -1068,20 +1094,20 @@ class PileupEngine(object):
             mean(pos.alleleMapQual[allele]),  # Average read mapping quality
             mapQualBias,
             pos.molecDepth,
-            pos.leftFlankProp(allele),
-            pos.rightFlankProp(allele),
+            max(pos.leftFlankProp(allele), pos.rightFlankProp(allele)),
             len(pos.nearbyVar) / pos.nWindow,
             mean(pos.alleleMismatch[allele]),
             mismatchBias,
             mean(pos.alleleAvFamSize[allele]),
             fSizeBias,
             mean(pos.alleleEndDist[allele]),
-            pos.duplexCounts[allele]
+            pos.duplexCounts[allele],
+            dnaDamageMut
         )
 
         return posStats
 
-    def filterAndWriteVariants(self, outFile, filter, unfilteredOut=None, filtThreshold=0.6, onlyDuplex=False, writeHeader=False):
+    def filterAndWriteVariants(self, outFile, filter, unfilteredOut=None, filtThreshold=0.6, onlyDuplex=False, indelRepeatThresh=4, writeHeader=False):
         """
 
         Filters candidate variants based upon specified characteristics, and writes the output to the output file
@@ -1092,11 +1118,12 @@ class PileupEngine(object):
         :param unfilteredOut: A sting containing a filepath to an output VCF file which will contain ALL variants, even those that do not pass filters
         :param filtThreshold: A float representing the classification threshold in which to filter variants
         :param onlyDuplex: A boolean indicating if only variants with duplex support should pass filters. Not recommended
+        :param indelRepeatThresh: An int indicating the number of times a repeat has to occur before an indel which is an expansion/contraction of this repeat is filtered out
         :param writeHeader: A boolean. If true, any existing file outFile will be overwritten, and a VCF header will be added to the file
         :return:
         """
 
-        def _generateVCFEntry(pos, chrom, start, filterCon):
+        def _generateVCFEntry(pos, chrom, start, filterCon, filterField):
             """
             Generates a VCF entry of the specified variant
 
@@ -1105,7 +1132,8 @@ class PileupEngine(object):
             :param pos: A Position or IndelPos object
             :param chrom: A string containing the reference name (i.e. chromosome) of this variant
             :param start: An int corresponding to the start position of this variant
-            :param filterCon: A float indicating how confident the filter is that this variant is real (btwn 0 and 1)
+            :param filterCon: A string (or iterable of strings) indicating how confident the filter is that this variant is real (btwn 0 and 1)
+            :param filterField: A string to be used for the info field
             :return: A string coresponding to the VCF entry of the provided position
             """
 
@@ -1146,6 +1174,7 @@ class PileupEngine(object):
 
             info.append("STP=" + ",".join(str(pos.alleleStrandBias[x]) for x in alleles))  # Strand bias
             info.append("VAF=" + ",".join(str(pos.alleleVafs[x])[:6] for x in alleles))  # VAF, truncate to 4 decimal places
+            info.append("FILT=" + ",".join(str(x) for x in filterCon))
 
             # Generate genotype fields
             genotype = [
@@ -1160,7 +1189,7 @@ class PileupEngine(object):
                         pos.ref, # REF
                         alt,  # ALT
                         str(qual),     # QUAL
-                        filterCon,   # FILTER
+                        filterField,   # FILTER
                         ";".join(info)  ,   # INFO
                          self._genotypeFormat,  # Genotype format field
                          ":".join(genotype) # GENOTYPE
@@ -1177,8 +1206,8 @@ class PileupEngine(object):
 
             if writeHeader:
                 # Write the standard VCF file header to the output file(s)
-                self._writeVcfHeader(o)
-                self._writeVcfHeader(u)
+                self._writeVcfHeader(o, filtThreshold)
+                self._writeVcfHeader(u, filtThreshold)
 
             # Start processing variants
             for chrom, positions in self.candidateVar.items():
@@ -1199,11 +1228,40 @@ class PileupEngine(object):
                                 stats = [self.varToFilteringStats(indel, "ALT")]
                                 filterResults = filter.predict_proba(stats)[0][0]
 
+                                passesConfFilter = True
+                                duplexSupportFilt = True
+                                # Set the appropriate FILTER attribute for this variant
+                                # PASS = Passes both filters
+                                # LOW_CONF = Low random forest confidence
+                                # NO_DUPLEX = No duplex support
+                                filterField = "PASS"
+                                if filterResults < filtThreshold:
+                                    passesConfFilter = False
+                                    filterField = "LOW_CONF"
+
+                                if (onlyDuplex and indel.duplexCounts["ALT"] == 0):  # Are we filtering based on duplex support?
+                                    duplexSupportFilt = False
+                                    if filterField == "LOW_CONF":
+                                        filterField = filterField + ";NO_DUPLEX"
+                                    else:
+                                        filterField = "NO_DUPLEX"
+
+                                # Check to see if this indel is an expansion or contraction of a repeat
+                                if len(indel.ref) > 1:  # i.e. a deletion
+                                    isRepeat = self.checkForRepeat(chrom, iPos, indel.ref[1:], indelRepeatThresh, True)
+                                else:
+                                    isRepeat = self.checkForRepeat(chrom, iPos, indel.alt[1:], indelRepeatThresh, False)
+                                if isRepeat:  # This variant is likely a sequencing artifact
+                                    passesConfFilter = False
+                                    if filterField == "PASS":
+                                        filterField = "REPEAT"
+                                    else:
+                                        filterField = filterField + ";REPEAT"
                                 # Write out the unfiltered variant
-                                vcfEntry = _generateVCFEntry(indel, chrom, iPos, str(filterResults))
+                                vcfEntry = _generateVCFEntry(indel, chrom, iPos, [str(filterResults)], filterField)
                                 u.write(vcfEntry)
 
-                                if filterResults > filtThreshold and (not onlyDuplex or indel.duplexCounts["ALT"] > 0):
+                                if passesConfFilter and duplexSupportFilt:  # This variant passes filters
                                     o.write(vcfEntry)
 
                             posToDelete.append(iPos)
@@ -1228,14 +1286,40 @@ class PileupEngine(object):
 
                         filterResults = filter.predict_proba(alleleStats)
 
-                        vcfEntry = _generateVCFEntry(candidateSNV, chrom, position, ";".join(list(str(x[0]) for x in filterResults)))
-                        u.write(vcfEntry)
-
                         # Filter alleles
                         failedAlleles = []
+                        allFiltResults = []
+                        allFiltConf = []
+                        passFiltConf = []
+                        passFiltResults = []
                         for result, allele in zip(filterResults, candidateSNV.altAlleles.keys()):
-                            if result[0] < filtThreshold and (not onlyDuplex or candidateSNV.duplexCounts[allele] > 0):
+                            result = result[0]
+                            passesConfFilter = True
+                            duplexSupportFilt = True
+                            # PASS = Passes both filters
+                            # LOW_CONF = Low random forest confidence
+                            # NO_DUPLEX = No duplex support
+                            filterField = "PASS"
+                            if result < filtThreshold:  # Fails filter confidence threshold
+                                passesConfFilter = False
+                                filterField = "LOW_CONF"
+                            if onlyDuplex and candidateSNV.duplexCounts[allele] == 0:
+                                duplexSupportFilt = False
+                                if filterField == "LOW_CONF":
+                                    filterField = filterField + ";NO_DUPLEX"
+                                else:
+                                    filterField = "NO_DUPLEX"
+
+                            if not passesConfFilter or not duplexSupportFilt:  # Fails duplex support filter
                                 failedAlleles.append(allele)
+                            else:
+                                passFiltResults.append(filterField)
+                                passFiltConf.append(result)
+                            allFiltResults.append(filterField)
+                            allFiltConf.append(result)
+
+                        vcfEntry = _generateVCFEntry(candidateSNV, chrom, position, allFiltConf, ";".join(allFiltResults))
+                        u.write(vcfEntry)
 
                         # Remove failed alleles
                         for fAllele in failedAlleles:
@@ -1243,7 +1327,7 @@ class PileupEngine(object):
 
                         # If any alt alleles passed filters, print them out
                         if candidateSNV.altAlleles:
-                            vcfEntry = _generateVCFEntry(candidateSNV, chrom, position, ";".join(list(str(x[0]) for x in filterResults if x[0] > filtThreshold)))
+                            vcfEntry = _generateVCFEntry(candidateSNV, chrom, position, passFiltConf, ";".join(passFiltResults))
                             o.write(vcfEntry)
 
                     del positions[position]  # Delete variants after processing them to reduce memory consumption
@@ -1253,24 +1337,136 @@ class PileupEngine(object):
                         sys.stderr.write(
                             "\t".join([self._printPrefix, time.strftime('%X'),
                                        chrom + ":Positions Filtered:" + str(self.varCount) + "\n"]))
-                # Process any remaining indels
+                # Process any remaining indels on this chromosome
                 try:
                     for iPos, indel in self.candidateIndels[chrom].items():
-                        indel.summarizeVariant()
-                        # Filter indel
-                        stats = [self.varToFilteringStats(indel, "ALT")]
-                        filterResults = filter.predict_proba(stats)[0][0]
+                        altAllele = indel.summarizeVariant()
 
-                        vcfEntry = _generateVCFEntry(indel, chrom, iPos, str(filterResults))
-                        u.write(vcfEntry)
+                        if altAllele:
+                            # Filter indel
+                            stats = [self.varToFilteringStats(indel, "ALT")]
+                            filterResults = filter.predict_proba(stats)[0][0]
 
-                        if filterResults > filtThreshold and (not onlyDuplex or indel.duplexCounts["ALT"] > 0):
-                            o.write(vcfEntry)
+                            passesConfFilter = True
+                            duplexSupportFilt = True
+                            # Set the appropriate FILTER attribute for this variant
+                            # PASS = Passes both filters
+                            # LOW_CONF = Low random forest confidence
+                            # NO_DUPLEX = No duplex support
+                            filterField = "PASS"
+                            if filterResults < filtThreshold:
+                                passesConfFilter = False
+                                filterField = "LOW_CONF"
+
+                            if (onlyDuplex and indel.duplexCounts[
+                                "ALT"] == 0):  # Are we filtering based on duplex support?
+                                duplexSupportFilt = False
+                                if filterField == "LOW_CONF":
+                                    filterField = filterField + ";NO_DUPLEX"
+                                else:
+                                    filterField = "NO_DUPLEX"
+
+                            # Check to see if this indel is an expansion or contraction of a repeat
+                            if len(indel.ref) > 1:  # i.e. a deletion
+                                isRepeat = self.checkForRepeat(chrom, iPos, indel.ref[1:], indelRepeatThresh, True)
+                            else:
+                                isRepeat = self.checkForRepeat(chrom, iPos, indel.alt[1:], indelRepeatThresh, False)
+                            if isRepeat:  # This variant is likely a sequencing artifact
+                                passesConfFilter = False
+                                if filterField == "PASS":
+                                    filterField = "REPEAT"
+                                else:
+                                    filterField = filterField + ";REPEAT"
+                            # Write out the unfiltered variant
+                            vcfEntry = _generateVCFEntry(indel, chrom, iPos, [str(filterResults)], filterField)
+                            u.write(vcfEntry)
+
+                            if passesConfFilter and duplexSupportFilt:  # This variant passes filters
+                                o.write(vcfEntry)
 
                     del self.candidateIndels[chrom]
                 except KeyError:
                     pass
+            # Finally, process any indels on remaining contigs
+            for chrom in self.candidateIndels:
+                for iPos, indel in self.candidateIndels[chrom].items():
+                    hasAlt = indel.summarizeVariant()
+                    if hasAlt:
+                        # Filter indel
+                        stats = [self.varToFilteringStats(indel, "ALT")]
+                        filterResults = filter.predict_proba(stats)[0][0]
+
+                        passesConfFilter = True
+                        duplexSupportFilt = True
+                        # Set the appropriate FILTER attribute for this variant
+                        # PASS = Passes both filters
+                        # LOW_CONF = Low random forest confidence
+                        # NO_DUPLEX = No duplex support
+                        filterField = "PASS"
+                        if filterResults < filtThreshold:
+                            passesConfFilter = False
+                            filterField = "LOW_CONF"
+
+                        if (onlyDuplex and indel.duplexCounts[
+                            "ALT"] == 0):  # Are we filtering based on duplex support?
+                            duplexSupportFilt = False
+                            if filterField == "LOW_CONF":
+                                filterField = filterField + ",NO_DUPLEX"
+                            else:
+                                filterField = "NO_DUPLEX"
+
+                        # Check to see if this indel is an expansion or contraction of a repeat
+                        if len(indel.ref) > 1:  # i.e. a deletion
+                            isRepeat = self.checkForRepeat(chrom, iPos, indel.ref[1:], indelRepeatThresh, True)
+                        else:
+                            isRepeat = self.checkForRepeat(chrom, iPos, indel.alt[1:], indelRepeatThresh, False)
+                        if isRepeat:  # This variant is likely a sequencing artifact
+                            passesConfFilter = False
+                            if filterField == "PASS":
+                                filterField = "REPEAT"
+                            else:
+                                filterField = filterField + ",REPEAT"
+                        # Write out the unfiltered variant
+                        vcfEntry = _generateVCFEntry(indel, chrom, iPos, [str(filterResults)], filterField)
+                        u.write(vcfEntry)
+
+                        if passesConfFilter and duplexSupportFilt:  # This variant passes filters
+                            o.write(vcfEntry)
+
             self.candidateVar = {}
+            self.candidateIndels = {}
+
+    def checkForRepeat(self, chrom, position, seq, threshold, offsetSearch):
+        """
+        Check to see if a given sequence occurs at a given position in the reference more than x number of times
+        :param chrom: A string listing the name of the contig to be examined
+        :param position: An int listing the position in the contig to be examined
+        :param seq: The sequence of the variant to be checked
+        :param threshold: An int listing the number of times the variant should occur
+        :param offsetSearch: A boolean. When searching, offset the starting position by the length of seq
+        :return: A boolean indicating if a repeat occurs
+        """
+
+        seqLength = len(seq)
+        if offsetSearch:
+            position = position + seqLength
+
+        endPos = position + seqLength * threshold
+        # Obtain the reference sequence to be examined for repeats
+        try:
+            refSeq = self._refGenome[chrom][position:endPos].seq
+        except IndexError:  # i.e. this indel occurs near the end of the genome. This filter does not apply
+            return False
+
+        # Now, check each slice for the repeats
+        for j in range(threshold):
+            cPos = j * seqLength
+            cEnd = cPos + seqLength
+            if refSeq[cPos:cEnd] != seq: # This sequence does not match. This sequence does not occur the specified number of times
+                return False
+
+        # The specified seq occurs more than threshold number of times
+        return True
 
     def processRead(self, read, rCigar):
         """
@@ -1304,11 +1500,6 @@ class PileupEngine(object):
             exit(1)
 
         # Obtain generic read characteristics
-        # If clipoverlap was run on this BAM file, the originating strand of each base will be stored in a tag
-        # TODO: FIX THIS!!!!!!!!!!
-        #try:  # Just in case this read does not contain that tag
-        #    rMapStrand = read.get_tag("co")
-        #except KeyError:  # i.e. The required tag is not present. Either these reads do not overlap at all, or clipoverlap was never run on the input BAM file
         rMappingQual = read.mapping_quality
 
         # All positions covered by this read
@@ -1333,18 +1524,24 @@ class PileupEngine(object):
 
         try:
             while True:
-                # for base, cigar, qual, mapStrand in zip(read.query_alignment_sequence, rCigar, read.query_alignment_qualities, rMapStrand):
+
                 cigar = rCigar[cigarIndex]
                 cigarIndex += 1
 
                 if cigar == 0:  # Matched base
                     # This is the most common case by far
                     base, qual = next(readIterator)
-                    distFromEnd = min(abs(position - read.reference_start), abs(read.reference_end - position))
+                    # Calculate the distance from the end of the read for this variant
+                    dist2Start = position - read.reference_start
+                    dist2End = read.reference_end - position
+                    if dist2Start < dist2End:
+                        distFromEnd = dist2Start
+                    else:
+                        distFromEnd = dist2End
 
-                    if lastCigar != 1:
+                    if lastCigar != 1 and lastCigar != 2:
                         # If this position overlaps a candidate indel, we also need to add this position to those indels
-                        # But don't do this if the last position was an insertion, as we do not want to double-count this read
+                        # But don't do this if the last position was an indel, as we do not want to double-count this read
                         try:
                             if position in self.rawIndels[self._chrom]:
                                 for indel in self.rawIndels[self._chrom][position ].values():
@@ -1710,6 +1907,7 @@ class PileupEngine(object):
 
                     length, indelType = event
                     # Where is this event?
+                    # We need to subtract 1, since we will be referencing the indel from the proceeding mapped base
                     pos = self._bufferPos + pos
 
                     readToIndel(pos, indelType, length, read)
@@ -2036,6 +2234,7 @@ class PileupEngine(object):
                     else:  # If it's a deletion, add the length of the deletion
                         endPos = coordinate + indelObj.length  # Add the length of the deletion at this position
                     processWindow(indelObj, coordinate, endPos, self.candidateIndels)
+            del self.rawIndels[self._chrom]
         except KeyError:
             pass
 
@@ -2118,15 +2317,19 @@ def validateArgs(args):
                         help="How many chromosomes to process simultaneously")
     parser.add_argument("--threshold", metavar="FLOAT", type=float, default=0.65,
                         help="Filtering threshold (lower=more lenient) [Default: 0.65]")
+    parser.add_argument("--repeat_count_threshold", metavar="INT", type=int, default=4,
+                        help="If an indel is an expansion or contraction of a nearby repeat which occurs at least this many times, filter it [Default: 4]")
     parser.add_argument("--duplex_support_only", action="store_true", help="Only output variants with duplex support")
-    parser.add_argument("--min_alt_depth", metavar="INT", type=int, default=4,
-                        help="Minimum number of reads required to even consider an alternate allele as possibly real [Default: 4]")
+    parser.add_argument("--min_alt_depth", metavar="INT", type=int, default=3,
+                        help="Minimum number of reads required to even consider an alternate allele as possibly real [Default: 3]")
     parser.add_argument("--realigned_BAM", metavar="BAM", help="Optional output BAM/SAM file for realigned reads")
     validatedArgs = parser.parse_args(listArgs)
 
     # Sanity check
     if 1 < validatedArgs.threshold or 0 > validatedArgs.threshold:
         raise parser.error("\'--threshold\' must be a float between 0 and 1")
+    if validatedArgs.repeat_count_threshold < 1 or validatedArgs.repeat_count_threshold > 10:
+        raise parser.error("\'--repeat_count_threshold\' must be between 1 and 10")
     return vars(validatedArgs)
 
 
@@ -2147,9 +2350,10 @@ parser.add_argument("-f", "--filter", metavar="PICKLE", type=lambda x: isValidFi
 parser.add_argument("-j", "--jobs", metavar="INT", type=int, help="How many chromosomes to process simultaneously")
 parser.add_argument("--threshold", metavar="FLOAT", type=float,
                     help="Filtering threshold (lower=more lenient) [Default: 0.65]")
+parser.add_argument("--repeat_count_threshold", metavar="INT", type=int, help="If an indel is an expansion or contraction of a nearby repeat which occurs at least this many times, filter it [Default: 4]")
 parser.add_argument("--duplex_support_only", action="store_true", help="Only output variants with duplex support")
 parser.add_argument("--min_alt_depth", metavar="INT", type=int,
-                    help="Minimum number of reads required to even consider an alternate allele as possibly real [Default: 4]")
+                    help="Minimum number of reads required to even consider an alternate allele as possibly real [Default: 3]")
 parser.add_argument("--realigned_BAM", metavar="BAM", help="Optional output BAM/SAM file for realigned reads")
 
 
@@ -2325,10 +2529,15 @@ def main(args=None, sysStdin=None, printPrefix="DELLINGR-CALL\t"):
 
             # Filter variants
             if first:
-                pileup.filterAndWriteVariants(args["output"], filterModel, args["unfiltered"], args["threshold"], writeHeader=True)
+                pileup.filterAndWriteVariants(args["output"], filterModel, args["unfiltered"], args["threshold"],
+                                              args["duplex_support_only"], args["repeat_count_threshold"], writeHeader=True)
                 first = False
             else:
-                pileup.filterAndWriteVariants(args["output"], filterModel, args["unfiltered"], args["threshold"])
+                pileup.filterAndWriteVariants(args["output"], filterModel, args["unfiltered"], args["threshold"],
+                                              args["duplex_support_only"], args["repeat_count_threshold"])
+            pileup.reset()
+
+    sys.stderr.write("\t".join([printPrefix, time.strftime('%X'), "Call Complete\n"]))
 
 if __name__ == "__main__":
     main()

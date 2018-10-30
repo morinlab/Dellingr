@@ -13,12 +13,11 @@ from configobj import ConfigObj
 try: # If not installed, this works
     import Trim
     import Collapse
-    import ClipOverlap
     import __version
     import AdapterPredict
     import Call
 except ImportError:
-    from Dellingr import Trim, Collapse, ClipOverlap, __version, AdapterPredict, Call
+    from Dellingr import Trim, Collapse, __version, AdapterPredict, Call
 
 
 def isValidFile(file, parser, default=None):
@@ -56,7 +55,7 @@ def makeConfig(configName, configPath, arguments):
     config.write()
 
 
-def configureOutput(sampleName, sampleParameters, outDir, argsToScript, printPrefix):
+def configureOutput(sampleName, sampleParameters, outDir, argsToScript):
     # Create a sample-specific output directory inside the specified output directory
     # Inside this directory, we are going to create seperate directories for the data,
     # intermediate files, and results
@@ -77,6 +76,8 @@ def configureOutput(sampleName, sampleParameters, outDir, argsToScript, printPre
     # Create a results directory which will hold the finalized BAM file, as well as the variant calls
     resultsDir = samplePath + os.sep + "results" + os.sep
 
+    # Create a plot directory for visualizations
+    plotDir = samplePath + os.sep + "figures" + os.sep
     # Create a config directory, which will hold the config file used to run each step of the pipeline
     configDir = samplePath + os.sep + "config" + os.sep
     os.mkdir(configDir)
@@ -85,8 +86,12 @@ def configureOutput(sampleName, sampleParameters, outDir, argsToScript, printPre
     # I am going to specify defaults for bwa here, as there is no script to run BWA anymore
     scriptToArgs = {}
 
-    bwaR1In = tmpDir + sampleName + ".trim_R1.fastq.gz"
-    bwaR2In = tmpDir + sampleName + ".trim_R2.fastq.gz"
+    if sampleParameters["no_barcodes"]:
+        # If there are no barcodes, we don't need to trim the reads before aligning them. So just use the original FASTQs
+        bwaR1In, bwaR2In = sampleParameters["fastqs"]
+    else:
+        bwaR1In = tmpDir + sampleName + ".trim_R1.fastq.gz"
+        bwaR2In = tmpDir + sampleName + ".trim_R2.fastq.gz"
     bwaOut = tmpDir + sampleName + ".trim.bam"
     collapseOut = tmpDir + sampleName + ".collapse.bam"
     collapseSortedOut = resultsDir + sampleName + ".collapse.sort.bam"
@@ -95,9 +100,10 @@ def configureOutput(sampleName, sampleParameters, outDir, argsToScript, printPre
 
     # Read group for BWA
     # Since the input and output of each script will be unique, specify them here
-    scriptToArgs["bwa"] = {"input": [bwaR1In, bwaR2In], "output": bwaOut, "reference": sampleParameters["reference"]}
+    scriptToArgs["bwa"] = {"input": [bwaR1In, bwaR2In], "output": bwaOut, "reference": sampleParameters["reference"],
+                           "fastqComment": not sampleParameters["no_barcodes"]}
     scriptToArgs["trim"] = {"input": sampleParameters["fastqs"], "output": [bwaR1In, bwaR2In]}
-    scriptToArgs["collapse"] = {"input": bwaOut, "output": collapseOut}
+    scriptToArgs["collapse"] = {"input": bwaOut, "output": collapseOut, "plot_dir": plotDir}
     scriptToArgs["call"] = {"input": collapseSortedOut, "output": callPassedOut, "unfiltered": callAllOut}
 
     for argument, scripts in argsToScript.items():
@@ -114,6 +120,10 @@ def configureOutput(sampleName, sampleParameters, outDir, argsToScript, printPre
 
     # Next, write a config file for each script
     for script, args in scriptToArgs.items():
+
+        # Don't create a config file for trim if there are no barcodes
+        if script == "trim" and sampleParameters["no_barcodes"]:
+            continue
         makeConfig(script, configDir, args)
 
     # Finally, lets create tmp directories (for the intermediate files), figure directories, and output directories
@@ -190,7 +200,7 @@ def checkArgs(rawArgs):
 
     # To validate the argument type, recreate the parser
     # BUT HERE, INDICATE IF AN ARGUMENT IS REQUIRED OR NOT
-    parser = argparse.ArgumentParser(description="Runs all stages of the Dellingr pipeline on the designated sample(s)")
+    parser = argparse.ArgumentParser(description="Runs all stages of the Dellingr pipeline on the designated samples")
     parser.add_argument("-c", "--config", metavar="INI", default=None, type=lambda x: isValidFile(x, parser),
                         help="A configuration file, specifying one or more arguments. Overriden by command line parameters")
     parser.add_argument("-d", "--outdir", metavar="DIR", default="." + os.sep,
@@ -327,6 +337,7 @@ def createLogFile(filePath, args, **toolVer):
 
         # Add a status message explaining that this log file can actually be used as a configuration file
         o.write("# This log file can be used as a Dellingr configuration file to repeat this analysis" + os.linesep)
+        o.write("# Current working directory: " + os.path.abspath(".") + os.linesep)
         o.write("[Pipeline]")
         o.write(os.linesep)
         o.write(os.linesep)
@@ -460,11 +471,13 @@ def runPipeline(sampleName, sampleDir, cleanup=False):
             exit(1)
         # Parse the arguments from the config file in the required order
         try:
-            bwaCommand = [bwaConfig["bwa"], "mem", "-C",
+            bwaCommand = [bwaConfig["bwa"], "mem",
                           bwaConfig["reference"],
                           bwaConfig["input"][0],
                           bwaConfig["input"][1],
                           ]
+            if bwaConfig["fastqComment"] == "True":  # We need to append the barcode sequence to the output BAM file
+                bwaCommand.insert(2, "-C")
             sortCommand = [bwaConfig["samtools"],
                            "sort", "-O", "BAM", "-o",
                            bwaConfig["output"]]
@@ -475,40 +488,43 @@ def runPipeline(sampleName, sampleDir, cleanup=False):
             samtoolsStderr = []
             bwaCounter = 0
 
-            bwaCom = subprocess.Popen(bwaCommand, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            sortCom = subprocess.Popen(sortCommand, stdin=bwaCom.stdout, stderr=subprocess.PIPE)
+            try:
+                bwaCom = subprocess.Popen(bwaCommand, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                sortCom = subprocess.Popen(sortCommand, stdin=bwaCom.stdout, stderr=subprocess.PIPE)
 
-            # Parse through the stderr lines of BWA and samtools, and buffer them as necessary
-            for bwaLine in bwaCom.stderr:
-                # If this line indicates the progress of BWA, print it out
-                bwaLine = bwaLine.decode("utf-8")
-                if bwaLine.startswith("[M::mem_process_seqs]"):
-                    bwaCounter += int(bwaLine.split(" ")[2])
-                    sys.stderr.write(
-                        "\t".join([printPrefix, time.strftime('%X'), "Reads Processed:" + str(bwaCounter) + "\n"]))
-                bwaStderr.append(bwaLine)
+                # Parse through the stderr lines of BWA and samtools, and buffer them as necessary
+                for bwaLine in bwaCom.stderr:
+                    # If this line indicates the progress of BWA, print it out
+                    bwaLine = bwaLine.decode("utf-8")
+                    if bwaLine.startswith("[M::mem_process_seqs]"):
+                        bwaCounter += int(bwaLine.split(" ")[2])
+                        sys.stderr.write(
+                            "\t".join([printPrefix, time.strftime('%X'), "Reads Processed:" + str(bwaCounter) + "\n"]))
+                    bwaStderr.append(bwaLine)
 
-            for samtoolsLine in sortCom.stderr:
-                samtoolsStderr.append(samtoolsLine.decode("utf-8"))
+                for samtoolsLine in sortCom.stderr:
+                    samtoolsStderr.append(samtoolsLine.decode("utf-8"))
 
-            bwaCom.stdout.close()
-            bwaCom.wait()
-            sortCom.wait()
-
-            if bwaCom.returncode != 0 or sortCom.returncode != 0:  # i.e. Something crashed
-                sys.stderr.write("ERROR: BWA and Samtools encountered an unexpected error and were terminated\n")
-                sys.stderr.write("BWA Standard Error Stream:\n")
-                sys.stderr.write(os.linesep.join(bwaStderr))
-                sys.stderr.write("Samtools Sort Standard Error Stream:\n")
-                sys.stderr.write(os.linesep.join(samtoolsStderr))
-                exit(1)
+                bwaCom.stdout.close()
+                bwaCom.wait()
+                sortCom.wait()
+                if bwaCom.returncode != 0 or sortCom.returncode != 0:  # i.e. Something crashed
+                    raise subprocess.CalledProcessError()
+            except BaseException as e:  # Either a program crashed, or something is hanging and the user has force quit
+                # To be safe, print out debugging info
+                sys.stderr.write("ERROR: BWA and Samtools encountered an unexpected error and were terminated" + os.linesep)
+                sys.stderr.write("BWA Standard Error Stream:" + os.linesep)
+                sys.stderr.write("".join(bwaStderr))
+                sys.stderr.write("Samtools Sort Standard Error Stream:" + os.linesep)
+                sys.stderr.write("".join(samtoolsStderr))
+                raise e
 
             sys.stderr.write("\t".join([printPrefix, time.strftime('%X'), "Mapping Complete\n"]))
 
-        except KeyError:  # i.e. A required argument is missing from the config file
+        except KeyError as e:  # i.e. A required argument is missing from the config file
             sys.stderr.write(
                 "ERROR: Unable to locate a required argument in the bwa config file \'%s\'\n" % (configPath))
-            exit(1)
+            raise e
 
 
     def sortAndRetag(inFile, outFile, bwaConfigPath):
@@ -565,10 +581,12 @@ def runPipeline(sampleName, sampleDir, cleanup=False):
     trimDone = os.path.join(sampleDir, "config", "Trim_Complete")  # Similar to Make's "TASK_COMPLETE" file
     if not os.path.exists(trimDone):  # i.e. Did Trim already complete for this sample? If so, do not re-run it
         trimConfig = os.path.join(sampleDir, "config", "trim_task.ini")  # Where is Trim's config file?
-        trimPrintPrefix = "DELLINGR-TRIM\t\t" + sampleName
-        Trim.main(sysStdin=["--config", trimConfig], printPrefix=trimPrintPrefix)  # Actually run Trim
-        open(trimDone,
-             "w").close()  # After Trim completes, it will create this file, signifying to the end user that this task completed
+        # Is there a trim config file? If not, then we don't need to run trim, as the sample doesn't have barcodes
+        if os.path.exists(trimConfig):
+            trimPrintPrefix = "DELLINGR-TRIM\t\t" + sampleName
+            Trim.main(sysStdin=["--config", trimConfig], printPrefix=trimPrintPrefix)  # Actually run Trim
+            open(trimDone,
+                 "w").close()  # After Trim completes, it will create this file, signifying to the end user that this task completed
 
     # Run bwa
     bwaDone = os.path.join(sampleDir, "config", "BWA_Complete")
@@ -621,7 +639,7 @@ def runPipeline(sampleName, sampleDir, cleanup=False):
     sys.stderr.write("\t".join([printPrefix, time.strftime('%X'), "%s: Pipeline Complete\n" % sampleName.rstrip()]))
 
 
-parser = argparse.ArgumentParser(description="Runs all stages of the Dellingr pipeline on the designated sample(s)")
+parser = argparse.ArgumentParser(description="Runs all stages of the Dellingr pipeline on the designated samples")
 parser.add_argument("-c", "--config", metavar="INI", default=None, type=lambda x: isValidFile(x, parser),
                     help="A configuration file, specifying one or more arguments. Overriden by command line parameters")
 parser.add_argument("--fastqs", metavar="FASTQ", default=None, nargs=2, type=lambda x: isValidFile(x, parser),
@@ -687,7 +705,8 @@ argsToPipelineComponent = {
     "targets": ["collapse", "call"],
     "tag_family_members": ["collapse"],
     "filter" : ["call"],
-    "threshold": ["call"]
+    "threshold": ["call"],
+    "no_barcodes": ["collapse"]
 }
 
 
@@ -777,9 +796,9 @@ def main(args=None, sysStdin=None):
                  "WARNING: Two FASTQ files must be provided for \'%s\', Skipping...\n" % (sample)]))
             continue
 
-        # If a barcode was not specified, estimate it using adapter_predict
+        # If a barcode was not specified, and there is one, estimate it using adapter_predict
         # Note that this will end catastrophically if the sample is multiplexed
-        if runArgs["barcode_sequence"] is None:
+        if not runArgs["no_barcodes"] and runArgs["barcode_sequence"] is None:
             if not barcodeWarned:
                 sys.stderr.write("\t".join([printPrefix, time.strftime('%X'), "Predicting Barcode Sequences...\n"]))
                 barcodeWarned = True
@@ -795,7 +814,7 @@ def main(args=None, sysStdin=None):
                 sys.stderr.write("We'll continue anyways, but if these FASTQs are multiplexed, the resulting analysis will merge those samples\n")
 
         # Configure the output directories and config files for this sample
-        sampleDir = configureOutput(sample, runArgs, baseOutDir, argsToPipelineComponent, printPrefix)
+        sampleDir = configureOutput(sample, runArgs, baseOutDir, argsToPipelineComponent)
         # Create a sample-specific log file
         sLogName = os.path.join(sampleDir, "config", sample + "_Task.log")
         createLogFile(sLogName, runArgs, bwa=bwaVer, samtools=samtoolsVer, python=pythonVer)

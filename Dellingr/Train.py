@@ -11,6 +11,10 @@ from sklearn.ensemble import RandomForestClassifier
 from configobj import ConfigObj
 from pyfaidx import Fasta
 import multiprocessing
+import matplotlib
+matplotlib.use('Agg')
+import seaborn
+import matplotlib.pyplot as plt
 try:
     import Call
     import DellingrExceptions as pe
@@ -109,27 +113,37 @@ def validateArgs(args):
         description="Creates a new random forest filtering model based upon the specified validated variants")
     parser.add_argument("-c", "--config", metavar="INI", type=lambda x: isValidFile(x, parser),
                         help="An optional configuration file which can provide one or more arguments")
-    parser.add_argument("-b", "--bam", metavar="BAM", required=True, nargs="+", type=lambda x: isValidFile(x, parser),
+    parser.add_argument("-b", "--bam", metavar="BAM", nargs="+", type=lambda x: isValidFile(x, parser),
                         help="Input post-collapse or post-clipoverlap BAM file")
-    parser.add_argument("-v", "--validations", metavar="VCF", required=True, nargs="+", type=lambda x: isValidFile(x, parser),
+    parser.add_argument("-v", "--validations", metavar="VCF", nargs="+", type=lambda x: isValidFile(x, parser),
                         help="Input VCF file listing validated variants.")
-    parser.add_argument("--ignore_vcfs", metavar="VCF", type=lambda x: isValidFile(x, parser), nargs="+",
-                        help="One or more optional VCF files listing variants that are to be excluded from filter training")
     parser.add_argument("-o", "--output", metavar="PICKLE", required=True, help="Output pickle file, containing the filtering classifier")
     parser.add_argument("-r", "--reference", metavar="FASTA", required=True, type=lambda x: isValidFile(x, parser),
                         help="Reference Genome, in FASTA format")
     parser.add_argument("-t", "--targets", metavar="BED", nargs="+", type=lambda x: isValidFile(x, parser),
                         help="A BED file containing regions in which to restrict variant calling")
-    parser.add_argument("-j", "--jobs", metavar="INT", type=int, default=1, help="Number of chromosomes to process simultaneously")
-    parser.add_argument("--true_stats", metavar="TSV", type=str,
-                        help="An optional output file containing all true variant status used to train the filter")
-    parser.add_argument("--false_stats", metavar="TSV", type=str,
-                        help="An optional output file containing all false variant status used to train the filter")
-    parser.add_argument("-d", "--plot_dir", metavar="DIR",
-                        help="An output directory for density plots visualizing the various characteristics")
+    miscArgs = parser.add_argument_group(description="Miscellaneous arguments")
+    miscArgs.add_argument("--ignore_vcfs", metavar="VCF", type=lambda x: isValidFile(x, parser), nargs="+",
+                        help="One or more optional VCF files listing variants that are to be excluded from filter training")
+    miscArgs.add_argument("-j", "--jobs", metavar="INT", type=int,
+                          help="Number of chromosomes to process simultaneously")
+    miscArgs.add_argument("--input_files", metavar="TSV", type=lambda x: isValidFile(x, parser),
+                          help="An input tab-deliniated file listing \'validations1.vcf input1.bam\'. May be used instead of \'-v\' and \'-b\'. May also specify targets.")
+    miscArgs.add_argument("--true_stats", metavar="TSV", type=str,
+                          help="An output file containing all true variant status used to train the filter")
+    miscArgs.add_argument("--false_stats", metavar="TSV", type=str,
+                          help="An optional output file containing all false variant status used to train the filter")
+    miscArgs.add_argument("-d", "--plot_dir", metavar="DIR",
+                          help="An output directory for density plots visualizing the various characteristics")
 
     args = parser.parse_args(listArgs)
-    return vars(args)
+    args = vars(args)
+
+    # Check input
+    if (not args["bam"] or not args["validations"]) and not args["input_files"]:
+        raise parser.error("The following arguments are required: -b/--bam AND -v/--validations OR --input_files")
+
+    return args
 
 def processSample(bamFile, refGenome, targets, contig, trueVariants, ignoreVariants, printPrefix):
 
@@ -181,21 +195,94 @@ def processSample(bamFile, refGenome, targets, contig, trueVariants, ignoreVaria
     for chrom in chromToDelete:
         del pileup.candidateVar[chrom]
 
+    # If there are more false variants than true variants (which is usually the case), subset them
+    if len(falseVarStats) > len(trueVarStats):
+        falseVarStats = random.sample(falseVarStats, len(trueVarStats))
+
     return trueVarStats, falseVarStats
+
+def parseInputFiles(args):
+    """
+    Parses input files from a specified config file
+
+    Examines the config file specified by args["input_files"], and parses out the input BAM files, VCF files, and
+    capture space files (if specified)
+    The input file format is assumed to be in the format of (tab-deliniated):
+    sample1.bam    sample1.vcf
+    :param args: A dictionary listing input parameters
+    :return: args: A dictionary storing the input parameters
+    """
+    bamFiles = []
+    vcfFiles = []
+    targetFiles = []
+
+    with open(args["input_files"]) as f:
+        for line in f:
+            # Remove line endings
+            line = line.rstrip("\n").rstrip("\r")
+            cols = line.split("\t")
+            try:
+                vcfFile = cols[0]
+                bamFile = cols[1]
+                try:
+                    targetFile = cols[2]
+                    # Check that this file exists
+                    if not os.path.exists(targetFile):
+                        raise FileNotFoundError("Unable to locate \'%s\'" % targetFile)
+                except IndexError:  # i.e. No target space was specified for this sample. That's ok, just set it to None
+                    targetFile = None
+                # Check that the remaining input files exist
+                if not os.path.exists(bamFile):
+                    raise FileNotFoundError("Unable to locate \'%s\'" % bamFile)
+                if not os.path.exists(vcfFile):
+                    raise FileNotFoundError("Unable to locate \'%s\'" % vcfFile)
+                # Now that we know these files actuall exist, save them
+                bamFiles.append(bamFile)
+                vcfFiles.append(vcfFile)
+                targetFiles.append(targetFile)
+            except IndexError as e:  # i.e we are missing one or more columns in the input file
+                raise TypeError("--input_files must be a tab-deliniated file listing \'variants.vcf    bamFile.bam\'") from e
+
+    # Now that we have parsed all the input files, modify the arguments dictionary to include them
+    args["bam"] = bamFiles
+    args["validations"] = vcfFiles
+    args["targets"] = targetFiles
+
+    return args
+
+
+def generatePlots(outDir, trueVarStats, falseVarStats, featureNames):
+    for i in range(0, len(featureNames)):
+        # What is this feature?
+        name = featureNames[i]
+        # Don't plot artifact variants, since that is a boolean
+        if name == "C->A mutation":
+            continue
+        # Parse the statistics of true variants and false variants for this feature
+        tStats = list(x[i] for x in trueVarStats)
+        fStats = list(x[i] for x in falseVarStats)
+        outFileName = outDir + os.sep + name + ".png"
+        seaborn.distplot(tStats, hist=False, color="b", label="True Variants")
+        hist = seaborn.distplot(fStats, hist=False, color="r", label="False Variants", axlabel=name)
+        plot = hist.get_figure()
+        plot.savefig(outFileName)
+        plt.clf()
 
 
 parser = argparse.ArgumentParser(description="Creates a new random forest filtering model trained using the supplied variants")
 parser.add_argument("-c", "--config", metavar="INI", type=lambda x: isValidFile(x, parser), help="An optional configuration file which can provide one or more arguments")
 parser.add_argument("-b", "--bam", metavar="BAM", type=lambda x: isValidFile(x, parser), nargs="+", help="One or more post-collapse BAM files. BAM files must be specified in the same order as \'--validations\'")
-parser.add_argument("-v", "--validations", metavar="VCF", type=lambda x: isValidFile(x, parser), nargs="+", help="One or more VCF files listing validated variants.")
-parser.add_argument("--ignore_vcfs", metavar="VCF", type=lambda x: isValidFile(x, parser, allowNone=True), nargs="+", help="One or more optional VCF files listing variants that are to be excluded from filter training")
 parser.add_argument("-o", "--output", metavar="PICKLE", help="Output pickle file, containing the trained filter")
 parser.add_argument("-r", "--reference", metavar="FASTA", type=lambda x: isValidFile(x, parser), help="Reference Genome, in FASTA format")
 parser.add_argument("-t", "--targets", metavar="BED", type=lambda x: isValidFile(x, parser, allowNone=True), nargs="+", help="One or more BED files containing regions in which to restrict variant calling. Must be specified in the same order as \'--bam\' (use \'None\' for no BED file)")
-parser.add_argument("-j", "--jobs", metavar="INT", type=int, help="Number of chromosomes to process simultaneously")
-parser.add_argument("--true_stats", metavar="TSV", type=str, help="An output file containing all true variant status used to train the filter")
-parser.add_argument("--false_stats", metavar="TSV", type=str, help="An optional output file containing all false variant status used to train the filter")
-parser.add_argument("-d", "--plot_dir", metavar="DIR", help="An output directory for density plots visualizing the various characteristics")
+parser.add_argument("-v", "--validations", metavar="VCF", type=lambda x: isValidFile(x, parser), nargs="+", help="One or more VCF files listing validated variants.")
+miscArgs = parser.add_argument_group(description="Miscellaneous arguments")
+miscArgs.add_argument("--ignore_vcfs", metavar="VCF", type=lambda x: isValidFile(x, parser, allowNone=True), nargs="+", help="One or more optional VCF files listing variants that are to be excluded from filter training")
+miscArgs.add_argument("-j", "--jobs", metavar="INT", type=int, help="Number of chromosomes to process simultaneously")
+miscArgs.add_argument("--input_files", metavar="TSV", type=lambda x:isValidFile(x, parser), help="An input tab-deliniated file listing \'validations1.vcf input1.bam\'. May be used instead of \'-v\' and \'-b\'. May also specify targets.")
+miscArgs.add_argument("--true_stats", metavar="TSV", type=str, help="An output file containing all true variant status used to train the filter")
+miscArgs.add_argument("--false_stats", metavar="TSV", type=str, help="An optional output file containing all false variant status used to train the filter")
+miscArgs.add_argument("-d", "--plot_dir", metavar="DIR", help="An output directory for density plots visualizing the various characteristics")
 
 def main(args=None, sysStdin=None, printPrefix="DELLINGR-TRAIN\t"):
     if args is None:
@@ -213,8 +300,11 @@ def main(args=None, sysStdin=None, printPrefix="DELLINGR-TRAIN\t"):
             sys.stderr.write(
                 "ERROR: Unable to locate a section named \'train\' in the config file \'%s\'\n" % (args["config"]))
             exit(1)
-    # Check that the args generated from the config file are validated
+    # Check that the args generated from the config file are valid
     args = validateArgs(args)
+    # Was a input config specified? If so, lets parse the input files from that
+    if args["input_files"]:
+        args = parseInputFiles(args)
     if args["targets"] is None:
         args["targets"] = [None] * len(args["bam"])
     elif len(args["targets"]) == 1:  # i.e. all samples have the same capture space
@@ -273,26 +363,29 @@ def main(args=None, sysStdin=None, printPrefix="DELLINGR-TRAIN\t"):
 
         i += 1
     sys.stderr.write("\t".join([printPrefix, time.strftime('%X'), "Training Random Forest\n"]))
-
-    # Subset the false variants so that there are an equal number of false and true variants
-    # If there are more validated variants than false variants, do not subset
-    if len(falseVarStats) > len(trueVarStats):
-        falseVarStats = random.sample(falseVarStats, len(trueVarStats))
+    varFeatures = ["Total_Supporting_Molecules", "Strand_Bias", "Mean_Base_Quality", "Base_Quality_Bias",
+                           "Mean_Mapping_Quality", "Mapping_Quality_Bias", "Total_Depth", "Homopolymer",
+                           "Nearby_Mismatch_Proportion", "Mean_Read_Mismatches", "Read_Mismatch_Bias",
+                           "Mean_Family_Size", "Family_Size_Bias", "Mean_Distance_To_Read_End",
+                           "Duplex_Counts", "C->A mutation"]
 
     # Dump the stats used to train the filters to the specified output files
     with open(args["true_stats"] if args["true_stats"] is not None else os.devnull, "w") as t,\
             open(args["false_stats"] if args["false_stats"] is not None else os.devnull, "w") as f:
 
         # Write the file headers
-        f.write("\t".join(["Total_Supporting_Molecules", "Strand_Bias", "Mean_Base_Quality", "Base_Quality_Bias",
-                           "Mean_Mapping_Quality", "Mapping_Quality_Bias", "Total_Depth", "Left_Flank_Homopolymer",
-                           "Right_Flank_Homopolymer", "Nearby_Mismatch_Proportion", "Mean_Read_Mismatches",
-                           "Read_Mismatch_Bias", "Mean_Family_Size", "Family_Size_Bias", "Mean_Distance_To_Read_End",
-                           "Duplex_Counts" + os.linesep]))
+        f.write("\t".join(varFeatures))
+        t.write("\t".join(varFeatures))
+        f.write(os.linesep)
+        t.write(os.linesep)
         for line in trueVarStats:
             t.write("\t".join(list(str(x) for x in line)) + os.linesep)
         for line in falseVarStats:
             f.write("\t".join(list(str(x) for x in line)) + os.linesep)
+
+    # Generate plots of these characteristics
+    if args["plot_dir"]:
+        generatePlots(args["plot_dir"], trueVarStats, falseVarStats, varFeatures)
 
     # Merge the false and true variant stats
     varStats = trueVarStats
@@ -300,7 +393,7 @@ def main(args=None, sysStdin=None, printPrefix="DELLINGR-TRAIN\t"):
     varStats.extend(falseVarStats)
     realOrNot.extend([1]*len(falseVarStats))
 
-    filter = RandomForestClassifier(n_estimators=50, max_features="auto")
+    filter = RandomForestClassifier(n_estimators=100, max_features="auto")
     filter.fit(varStats, realOrNot)
 
     # Write the trained classifier out to the file
@@ -308,6 +401,11 @@ def main(args=None, sysStdin=None, printPrefix="DELLINGR-TRAIN\t"):
         pickle._dump(filter, o)
 
     sys.stderr.write("\t".join([printPrefix, time.strftime('%X'), "Filter trained and saved in \'%s\'\n" % args["output"]]))
+
+    # Generate plots of these characteristics
+    if args["plot_dir"]:
+        sys.stderr.write("\t".join([printPrefix, time.strftime('%X'), "Generating Figures..." + os.linesep]))
+        generatePlots(args["plot_dir"], trueVarStats, falseVarStats, varFeatures)
 
 if __name__ == "__main__":
     main()
