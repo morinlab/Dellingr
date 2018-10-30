@@ -20,7 +20,7 @@ with open("README.md", "r") as fh:
 setup(
     name='Dellingr',
     version=version,
-    description='Error supression and variant calling pipeline for Second-Generation sequencing data',
+    description='Error supression and variant calling pipeline for Illumina sequencing data',
     long_description=long_description,
     long_description_content_type="text/markdown",
     author='Christopher Rushton',
