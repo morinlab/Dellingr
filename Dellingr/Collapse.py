@@ -294,7 +294,7 @@ class Family:
         self.size += family.size
         self.members.extend(family.members)
 
-    def consensus(self, abnormalityThresold=0.4):
+    def consensus(self):
         """
         Merge all sequences and quality scores stored in this read pair into a consensus
         """
@@ -303,26 +303,32 @@ class Family:
         # This "Family" object can store more than one read pair
         # And I think it's about time we fixed that
 
-        # First, because of some cigar sequence BS, we need to account for the fact that
-        # some of these families may have some leading soft clipping
-        # The easiest way to account for this is to simply figure out what the offset of each
-        # sequence is
-
-        R1consensus, R1qual, R1cigar, R1softClip = self._consensusByRead(self.R1sequence, self.R1qual, self.R1cigar, self.R1.is_reverse)
-        R2consensus, R2qual, R2cigar, R2softClip = self._consensusByRead(self.R2sequence, self.R2qual, self.R2cigar, self.R2.is_reverse)
-        self.R1sequence = [R1consensus]
-        self.R2sequence = [R2consensus]
-        self.R1qual = [R1qual]
-        self.R2qual = [R2qual]
-        self.R1cigar = [R1cigar]
-        self.R2cigar = [R2cigar]
-        self.R1start += R1softClip
-        self.R2start += R2softClip  # Compensate for any changes in soft-clipping
+        # If there is actually only one read pair stored in this family, we don't need to do anything
+        try:
+            self.R1sequence[1]
+            # First, because of some cigar sequence BS, we need to account for the fact that
+            # some of these families may have some leading soft clipping
+            # The easiest way to account for this is to simply figure out what the offset of each
+            # sequence is
+            R1consensus, R1qual, R1cigar, R1softClip = self._consensusByRead(self.R1sequence, self.R1qual, self.R1cigar, self.R1.is_reverse)
+            R2consensus, R2qual, R2cigar, R2softClip = self._consensusByRead(self.R2sequence, self.R2qual, self.R2cigar, self.R2.is_reverse)
+            self.R1sequence = [R1consensus]
+            self.R2sequence = [R2consensus]
+            self.R1qual = [R1qual]
+            self.R2qual = [R2qual]
+            self.R1cigar = [R1cigar]
+            self.R2cigar = [R2cigar]
+            self.R1start += R1softClip
+            self.R2start += R2softClip  # Compensate for any changes in soft-clipping
+        except IndexError:
+            # i.e. there is only one read pair stored at this position
+            # In this case, we should reset the read start positions back to the original position
+            self.R1start = self.R1.reference_start
+            self.R2start = self.R2.reference_start
 
     def _consensusByRead(self, sequences, qualities, cigars, reverseClip=False):
 
         # Generate a consensus for all reads in the family in the provided orientation
-
         consensusSeq = []
         consensusQual = []
         consensusCigar = []
@@ -361,10 +367,21 @@ class Family:
                         softClippedNum += 1
 
                     # If this sequence has an insertion at this position,
-                    # We need to account for it, and store it seperatly for comparison
+                    # We need to account for it, and store it separately for comparison
                     j = 0
+                    invalidInsertion = False
                     while cigar == 1:
                         try:
+                            previousCigar = cigars[i][cigarIndex[i] - 1]
+                            if previousCigar == 4:
+                                raise IndexError("Insertion following soft-clipped bases")
+                        except IndexError:
+                            # In this case, we will have to soft-clip the insertion after processing it
+                            # This isn't perfect, but I don't want to duplicate a whole block of code
+                            invalidInsertion = True
+                        try:
+                            # As a sanity check, make sure this insertion doesn't occur after soft-clipping or at the
+                            # start of the read, as that is not a valid cigar sequence
                             if i == 0:
                                 refLength += 1
                             base = sequences[i][baseIndex[i]]
@@ -383,10 +400,29 @@ class Family:
                             baseIndex[i] += 1
                             j += 1
                             cigar = cigars[i][cigarIndex[i]]
+                            if cigar == 4:
+                                raise IndexError("Invalid Cigar Sequence")
 
-                        except IndexError as e: # This record ends with an insertion, which is not valid
-                            badCigar = self.listToCigar(cigars[i])
-                            raise TypeError("Invalid Cigar Sequence %s" % badCigar) from e
+                        except IndexError:
+                            invalidInsertion = True
+
+                    if invalidInsertion:
+                        # This record ends with an insertion, or the next base is soft-clipped
+                        # As this cigar is invalid, lets just soft-clip the entire insertion
+                        for k in range(0, j):
+                            cigars[i][cigarIndex[i] - j + k] = 4
+                            # Since we previously counted the insertion, remove the bases from the insertion construct
+                            iBaseIndex = baseIndex[i] - j + k
+                            base = sequences[i][iBaseIndex]
+                            qual = qualities[i][iBaseIndex]
+                            insertion[k][base][0] -= 1  # Deincriment the counter for this base in the index
+                            insertion[k][base][2] -= qual
+                            # Since we don't know the previous max base quality, we can't revert that change
+                            # Hence its a feature, not a bug ;)
+                        cigarIndex[i] -= j
+                        baseIndex[i] -= j
+                        if i == 0:
+                            refLength -= 1
 
                     # In the case of a deletion, all we need to do is indicate that there is
                     # a deletion at this position
@@ -408,9 +444,6 @@ class Family:
                         cigarIndex[i] += 1
                         baseIndex[i] += 1
                     seqCollapsed += 1
-
-                #except IndexError:
-                #    pass
 
             if seqCollapsed / seqNumber < 0.5:
                 break
@@ -455,7 +488,6 @@ class Family:
                     maxCigOp = 0
 
             # Next, determine if the insertion is actually more common than the current base
-            # TODO: Check if this breaks anything. Because it looks like it might
             insertionWeight = sum(insertion[0][x][0] for x in insertion[0]) if len(insertion) != 0 else -1
             if insertionWeight > seqCollapsed/ 2:
 
@@ -494,7 +526,7 @@ class Family:
                 consensusCigar.append(2)
             refLength += 1
 
-        # To handle the extremely rare cases which may cause a consensus read to start or end with a INDEL
+        # To handle the extremely rare cases which may cause a consensus read to start or end with a indel
         # Remove such events from the start or end of the read
         # From the start of the read
         i = 0
@@ -575,6 +607,7 @@ class Family:
         self.R1.reference_start = self.R1start
         self.R2.query_name = self.name
         self.R2.reference_start = self.R2start
+
         if tagOrig:
             self.R1.set_tag("Zm", ",".join(self.members))
             self.R2.set_tag("Zm", ",".join(self.members))
@@ -710,7 +743,8 @@ class Position:
                 distance = 0
                 cFamilyName = list(familyName[x] for x in collapseIndices)
                 for b1, b2 in zip(cFamilyName, cBarcode):
-                    if b1 != b2:
+                    # Don't count bases which are "N"s as distance between barcodes
+                    if b1 != b2 and b1 != "N" and b2 != "N":
                         distance += 1
                 if distance < minDistance:
                     # In the case of a tie, the largest family will be taken
@@ -1076,13 +1110,13 @@ class FamilyCoordinator:
                 # Discard supplementary and secondary alignments
                 if read.is_supplementary or read.is_secondary:
                     continue
-                self.readCounter += 1
                 # If this read and it's mate are unmapped, ignore it
                 try:
                     currentPos = read.reference_start
                     currentChrom = read.reference_name
                 except ValueError:
                     continue
+                self.readCounter += 1
 
                 # If the start position of this read is not the same as the start position of the
                 # previous read, and assuming the input BAM file is sorted, then we can assume that
@@ -1157,18 +1191,21 @@ class FamilyCoordinator:
                 # Is this read pair missing a cigar string? If so, don't process it
                 if pair.malformed:
                     self.malformedCigar += 1
+                    self.readCounter -= 2
                     continue
 
                 # Is this read pair missing a barcode tag? If so, we can't process it, as we
                 # won't be able to find out which family it belongs to
                 if pair.invalidBarcode:
                     self.missingBarcode += 1
+                    self.readCounter -= 2
                     continue
 
                 # If this read pair is split(i.e. the reads map to different chromosomes), then it's very likely that
                 # one of the existing read's positions was processed a long time ago. In which case, we can no longer
                 # collapse it
                 if pair.isSplit:
+                    self.readCounter -= 2
                     continue
 
                 # if this read pair falls outside the capture space completely, don't process it
@@ -1176,6 +1213,7 @@ class FamilyCoordinator:
                     withinCapture = self._withinCaptureSpace(pair)
                     if not withinCapture:
                         self.outsideCaptureSpace += 1
+                        self.readCounter -= 2
                         continue
 
                 # If this read pair contains leading soft clipping, then the start position of
@@ -1251,26 +1289,33 @@ class FamilyCoordinator:
                     "\t".join([self.printPrefix, time.strftime('%X'), "Collapsed " + str(self.pairCounter) + " pairs into " + str(counter) + " families" + os.linesep]))
                 sys.stderr.write("\t".join([self.printPrefix, time.strftime('%X'), "Collapse Complete\n"]))
 
-    def generatePlots(self, outDir):
+    def generatePlots(self, outPrefix, ignoreException=False):
         """
         Generate several histograms visualizing the family size distribution of duplex and non-duplex read pairs
-        :param outDir: A path to the output folder where the plots will be generated
+        :param outPrefix: A string listing the output folder and prefix for the plots
+        :param ignoreException: A boolean indicating if errors that occur during plot generation should be ignored
         :return:
         """
 
         bins = list(range(0, 25)) # We shouldn't have family sizes > 25, unless the library is very saturated
 
-        # Generate a histogram for the overall family size distribution
-        overallAx = seaborn.distplot(a=self.familyDistribution, axlabel="Family Size", label="Family Size Distribution")
-        overallHist = overallAx.get_figure()
-        outFile = outDir + os.path.sep + "Family_Size_Distribution.png"
-        overallHist.savefig(outFile)
+        try:
+            # Generate a histogram for the overall family size distribution
+            overallAx = seaborn.distplot(a=self.familyDistribution, axlabel="Family Size", label="Family Size Distribution")
+            overallHist = overallAx.get_figure()
+            outFile = outPrefix + "Family_Size_Distribution.png"
+            overallHist.savefig(outFile)
 
-        # Generate a histogram for families in duplex
-        duplexAx = seaborn.distplot(a=self.familyDistribution, axlabel="Family Size", label="Family Size Distribution (duplexes)")
-        duplexHist = overallAx.get_figure()
-        outFile = outDir + os.path.sep + "Duplex_Family_Size_Distribution.png"
-        duplexHist.savefig(outFile)
+            # Generate a histogram for families in duplex
+            duplexAx = seaborn.distplot(a=self.familyDistribution, axlabel="Family Size", label="Family Size Distribution (duplexes)")
+            duplexHist = overallAx.get_figure()
+            outFile = outPrefix + "Duplex_Family_Size_Distribution.png"
+            duplexHist.savefig(outFile)
+        except BaseException as e:
+            # So the analysis pipeline does not fail simply because the family size plots can't be generated,
+            # quietly handle any errors that occur
+            if not ignoreException:
+                raise e
 
 
 def validateArgs(args):
@@ -1300,44 +1345,45 @@ def validateArgs(args):
             listArgs.append(str(parameter))
 
     parser = argparse.ArgumentParser(description="Collapsed duplicate sequences into a consensus")
-    parser.add_argument("-c", "--config", type=lambda x: isValidFile(x, parser),
+    parser.add_argument("-c", "--config", metavar="INI", type=lambda x: isValidFile(x, parser),
                         help="An optional configuration file, which can provide one or more arguments")
-    parser.add_argument("-i", "--input", type=lambda x: isValidFile(x, parser, True), required=True,
+    parser.add_argument("-i", "--input", metavar="SAM/BAM/CRAM", type=lambda x: isValidFile(x, parser, True), required=True,
                         help="Input sorted SAM/BAM/CRAM file (use \"-\" to read from stdin [use control + d to stop reading])")
-    parser.add_argument("-o", "--output", required=True,
+    parser.add_argument("-o", "--output", metavar="SAM/BAM/CRAM", required=True,
                         help="Output SAM/BAM/CRAM file (use \"-\" to write to stdout). Will be unsorted")
-    parser.add_argument("-t", "--targets", type=lambda x: isValidFile(x, parser),
+    parser.add_argument("-t", "--targets", metavar="BED", type=lambda x: isValidFile(x, parser),
                         help="A BED file listing targets of interest")
     parser.add_argument("--no_barcodes", action="store_true", help="This sample is not using barcoded adapters")
     parser.add_argument("--collapse_duplexes", action="store_true", help="Generate a consensus from the forward and reverse strands")
-    parser.add_argument("-fm", "--family_mask", type=str,
+    parser.add_argument("-fm", "--family_mask", metavar="0001111111111110", type=str,
                         help="Positions in the barcode to consider when collapsing reads into a consensus (1=Consider, 0=Ignore)")
-    parser.add_argument("-dm", "--duplex_mask", type=str,
+    parser.add_argument("-dm", "--duplex_mask", metavar="0000000001111110", type=str,
                         help="Positions in the barcode to consider when determining if two families are in duplex (1=Consider, 0=Ignore)")
-    parser.add_argument("-fmm", "--family_mismatch", type=int,
+    parser.add_argument("-fmm", "--family_mismatch", metavar="INT", type=int,
                         help="Maximum number of mismatches permitted when collapsing reads into a family")
-    parser.add_argument("-dmm", "--duplex_mismatch", type=int,
+    parser.add_argument("-dmm", "--duplex_mismatch", metavar="INT", type=int,
                         help="Maximum number of mismatches permitted when identifying of two families are in duplex")
     parser.add_argument("--tag_family_members", action="store_true",
                         help="Store the names of all reads used to generate a consensus in the tag \'Zm\'")
-    parser.add_argument("--plot_dir", metavar="DIR", help="Output directory for summary plots")
+    parser.add_argument("--plot_prefix", metavar="DIR", help="Output directory for summary plots")
     parser.add_argument("-r", "--reference", required=True, type=lambda x: isValidFile(x, parser),
                         help="Reference genome, in FASTA format")
     parser.add_argument("--input_format", metavar="SAM/BAM/CRAM", choices=["SAM", "BAM", "CRAM"],
                           help="Input file format [Default: Detect using file extension]")
+    parser.add_argument("--ignore_exception", action="store_true", help=argparse.SUPPRESS)
     validatedArgs = parser.parse_args(listArgs)
     validateArgs = vars(validatedArgs)
 
     # Ensure either the user specified all the barcode parameters, or that no barcodes are used
-    if not args["no_barcodes"]:
+    if not validateArgs["no_barcodes"]:
         missingArgs = []
-        if not args["family_mask"]:
+        if not validateArgs["family_mask"]:
             missingArgs.append("-fm/--family_mask")
-        if not args["family_mismatch"]:
+        if not validateArgs["family_mismatch"]:
             missingArgs.append("-fmm/--family_mismatch")
-        if not args["duplex_mask"]:
+        if not validateArgs["duplex_mask"]:
             missingArgs.append("-dm/--duplex_mask")
-        if not args["duplex_mismatch"]:
+        if not validateArgs["duplex_mismatch"]:
             missingArgs.append("-dmm/--duplex_mismatch")
         # If arguments are missing, error out
         if len(missingArgs) > 0:
@@ -1345,14 +1391,14 @@ def validateArgs(args):
     else:
         # If we are not using barcoded adapters, we can set some default parameters for "barcode" collapsing
         # These defaults are based on results I obtained testing ~40 samples with different barcode lengths and parameters
-        if not args["family_mask"]:
-            args["family_mask"] = "111111111111111"
-        if not args["family_mismatch"]:
-            args["family_mismatch"] = 3
-        if not args["duplex_mask"]:
-            args["duplex_mask"] = "111111111111111"
-        if not args["duplex_mismatch"]:
-            args["duplex_mismatch"] = 3
+        if not validateArgs["family_mask"]:
+            validateArgs["family_mask"] = "111111111111111"
+        if not validateArgs["family_mismatch"]:
+            validateArgs["family_mismatch"] = 3
+        if not validateArgs["duplex_mask"]:
+            validateArgs["duplex_mask"] = "111111111111111"
+        if not validateArgs["duplex_mismatch"]:
+            validateArgs["duplex_mismatch"] = 3
     return validateArgs
 
 
@@ -1380,31 +1426,32 @@ def isValidFile(file, parser, allowStream=False):
 
 # Process command line arguments
 parser = argparse.ArgumentParser(description="Collapsed duplicate sequences into a consensus")
-parser.add_argument("-c", "--config", type=lambda x: isValidFile(x, parser),
+parser.add_argument("-c", "--config", metavar="INI", type=lambda x: isValidFile(x, parser),
                     help="An optional configuration file, which can provide one or more arguments")
-parser.add_argument("-i", "--input", type=lambda x: isValidFile(x, parser, True),
+parser.add_argument("-i", "--input", metavar="SAM/BAM/CRAM", type=lambda x: isValidFile(x, parser, True),
                     help="Input sorted SAM/BAM/CRAM file (use \"-\" to read from stdin [and \"Control + D\" to stop reading])")
-parser.add_argument("-o", "--output", help="Output SAM/BAM/CRAM file (use \"-\" to write to stdout). Will be unsorted")
-parser.add_argument("-r", "--reference", type=lambda x: isValidFile(x, parser),
+parser.add_argument("-o", "--output", metavar="SAM/BAM/CRAM", help="Output SAM/BAM/CRAM file (use \"-\" to write to stdout). Will be unsorted")
+parser.add_argument("-r", "--reference", metavar="FASTA", type=lambda x: isValidFile(x, parser),
                     help="Reference genome, in FASTA format")
-parser.add_argument("-t", "--targets", type=lambda x: isValidFile(x, parser),
+parser.add_argument("-t", "--targets", metavar="BED", type=lambda x: isValidFile(x, parser),
                     help="A BED file listing target regions of interest")
 parser.add_argument("--no_barcodes", action="store_true", help="This sample is not using barcoded adapters")
 barcodeArgs = parser.add_argument_group(description="Arguments when using barcoded adapters")
-barcodeArgs.add_argument("-fm", "--family_mask", type=str,
+barcodeArgs.add_argument("-fm", "--family_mask", metavar="0001111111111110", type=str,
                     help="Positions in the barcode to consider when collapsing reads into a consensus (1=Consider, 0=Ignore)")
-barcodeArgs.add_argument("-dm", "--duplex_mask", type=str,
+barcodeArgs.add_argument("-dm", "--duplex_mask", metavar="0000000001111110", type=str,
                     help="Positions in the barcode to consider when determining if two families are in duplex (1=Consider, 0=Ignore)")
-barcodeArgs.add_argument("-fmm", "--family_mismatch", type=int,
+barcodeArgs.add_argument("-fmm", "--family_mismatch", metavar="INT", type=int,
                     help="Maximum number of mismatches permitted when collapsing reads into a family")
-barcodeArgs.add_argument("-dmm", "--duplex_mismatch", type=int,
+barcodeArgs.add_argument("-dmm", "--duplex_mismatch", metavar="INT", type=int,
                     help="Maximum number of mismatches permitted when identifying of two families are in duplex")
 miscArgs = parser.add_argument_group(description="Miscellaneous Arguments")
 miscArgs.add_argument("--tag_family_members", action="store_true", help="Store the names of all reads used to generate a consensus in the tag \'Zm\'")
-miscArgs.add_argument("--plot_dir", metavar="DIR", help="Output directory for summary plots")
+miscArgs.add_argument("--plot_prefix", metavar="DIR", help="Output directory/prefix for summary plots")
 miscArgs.add_argument("--collapse_duplexes", action="store_true",
                     help="Generate a consensus from the forward and reverse strands")
 miscArgs.add_argument("--input_format", metavar="SAM/BAM/CRAM", choices=["SAM", "BAM", "CRAM"], help="Input file format [Default: Detect using file extension]")
+miscArgs.add_argument("--ignore_exception", action="store_true", help=argparse.SUPPRESS)
 
 
 def main(args=None, sysStdin=None, printPrefix="DELLINGR-COLLAPSE"):
@@ -1501,7 +1548,25 @@ def main(args=None, sysStdin=None, printPrefix="DELLINGR-COLLAPSE"):
             command += " " + str(parameter)
     header["PG"].append({"ID": "DELLINGR-COLLAPSE", "PN": "Dellingr", "CL": command})
 
-    outBAM = pysam.AlignmentFile(args["output"], "wb", template=inBAM, header=header)
+    try:
+        outFileExt = args["output"].split(".")[-1].upper()
+    except AttributeError:  # i.e. we are writing to a pipe. There is no file extension
+        outFileExt = None
+    if outFileExt == "BAM":
+        outBAM = pysam.AlignmentFile(args["output"], "wb", template=inBAM, header=header)
+    elif outFileExt == "SAM":
+        outBAM = pysam.AlignmentFile(args["output"], "w", template=inBAM, header=header)
+    elif outFileExt == "CRAM":
+        outBAM = pysam.AlignmentFile(args["output"], "wc", template=inBAM, header=header, reference_filename=args["reference"])
+    else:  # The output file extension does not specify the file type. Set the output file type the same as the input
+        sys.stderr.write("WARNING: Unable to determine output file type. Using input file format \'%s\'" % inFormat + os.linesep)
+        if inFormat == "CRAM":
+            outBAM = pysam.AlignmentFile(args["output"], "wc", template=inBAM, header=header,
+                                         reference_filename=args["reference"])
+        elif inFormat == "SAM":
+            outBAM = pysam.AlignmentFile(args["output"], "w", template=inBAM, header=header)
+        else:
+            outBAM = pysam.AlignmentFile(args["output"], "wb", template=inBAM, header=header)
 
     readProcessor = FamilyCoordinator(inBAM, args["reference"], familyIndices, args["family_mismatch"],
                                       duplexIndices, args["duplex_mismatch"], len(args["duplex_mask"]) * 2,
@@ -1512,8 +1577,8 @@ def main(args=None, sysStdin=None, printPrefix="DELLINGR-COLLAPSE"):
         outBAM.write(read)
 
     # If the user specified an output directory for plots, generate them
-    if args["plot_dir"] is not None:
-        readProcessor.generatePlots(args["plot_dir"])
+    if args["plot_prefix"] is not None:
+        readProcessor.generatePlots(args["plot_prefix"], args["ignore_exception"])
 
 
 if __name__ == "__main__":
