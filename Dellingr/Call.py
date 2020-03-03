@@ -8,10 +8,9 @@ import sortedcontainers
 import pickle
 from sklearn.ensemble import RandomForestClassifier
 from skbio import alignment
-from scipy.stats import ttest_ind
+from scipy.stats import ttest_ind, fisher_exact
 from pyfaidx import Fasta
 import time
-from fisher import pvalue as fisher_exact
 from statistics import mean
 from configobj import ConfigObj
 import bisect
@@ -29,6 +28,27 @@ except ImportError:
     from Dellingr import DellingrExceptions as pe
 
 
+class VariantStatsInNormal(object):
+    """
+    The allele counts of a variant in the matched normal sample, if provided
+
+    This class supports both indels and SNVs
+    """
+
+    def __init__(self, alleleCounts, negStrandCounts, posStrandCounts, isGermline):
+        """
+
+        :param alleleCounts: A dictionary containing total allele counts {Allele: Counts} ex. {A:5}
+        :param negStrandCounts: A dictionary containing allele counts for reads mapping to the negative strand
+        :param posStrandCounts: A dictionary containing allele counts for reads mapping to the positive strand
+        :param isGermline: A boolean indicating if this variant is a germline variant
+        """
+        self.alleleCounts = alleleCounts
+        self.negStrandCounts = negStrandCounts
+        self.posStrandCounts = posStrandCounts
+        self.isGermline = isGermline
+
+
 class Haplotype(object):
     """
     TODO: An object that stores an aligned sequence ("Haplotype"), it's differences relative to the reference, and
@@ -37,17 +57,19 @@ class Haplotype(object):
     A haplotype is generated from reads which contain indels, and represents that indel
     """
 
-    def __init__(self, seq=None, eventFromRef=None):
+    def __init__(self, seq=None, eventFromRef=None, scoreFromRef=None):
         """
 
         :param seq: A string containing a nucleotide sequence which coresponds to the assembled haplotype
         :param support: A list containing strings coresponding to the reads which support this event
         :param eventFromRef: A cigar string containing the distance from this alignment to the reference
+        :param
         """
         self.seq = seq
-        self.support = []
+        self.support = 0
         self.eventFromRef=eventFromRef
         self.alignmentStructure=alignment.StripedSmithWaterman(seq, mismatch_score=-3, match_score=1)
+        self.scoreFromRef = scoreFromRef
 
 
 class Position(object):
@@ -56,12 +78,12 @@ class Position(object):
     """
 
     # Reduce memory footprint
-    __slots__ = ("alleles", "qualities", "famSizes", "posParent", "mapStrand", "distToEnd", "mismatchNum",
+    __slots__ = ("alleles", "qualities", "famSizes", "posParent", "mapStrand", "mismatchNum",
                  "mappingQual", "readNum", "readName", "alt", "altAlleles", "depth", "altDepth",
                  "leftWindow", "ref", "rightWindow", "nearbyVar", "nWindow", "baseCounts",
                  "alleleStrongCounts", "strandCounts", "posMolec", "negMolec", "pMapStrand", "nMapStrand",
                  "alleleMapQual", "alleleBaseQual", "alleleStrandBias", "alleleVafs", "molecDepth", "alleleMismatch",
-                 "alleleAvFamSize", "alleleEndDist", "duplexCounts")
+                 "alleleAvFamSize", "duplexCounts")
     def __init__(self, refBase):
         self.ref = refBase
 
@@ -71,7 +93,6 @@ class Position(object):
         self.famSizes = [None] * 5
         self.posParent = [None] * 5
         self.mapStrand = [None] * 5
-        self.distToEnd = [None] * 5
         self.mismatchNum = [None] * 5
         self.mappingQual = [None] * 5
         self.readNum = [None] * 5
@@ -81,7 +102,7 @@ class Position(object):
         self.depth = 0
         self.altDepth = 0
 
-    def add(self, base, qual, size, posParent, mapStrand, dist, mapQual, readNum, readName):
+    def add(self, base, qual, size, posParent, mapStrand, mapQual, readNum, readName):
 
         # Add a new base, as well as the corresponding characteristics, to this position
         try:
@@ -92,7 +113,6 @@ class Position(object):
             self.famSizes.extend([None] * 150)
             self.posParent.extend([None] * 150)
             self.mapStrand.extend([None] * 150)
-            self.distToEnd.extend([None] * 150)
             self.mismatchNum.extend([None] * 150)
             self.mappingQual.extend([None] * 150)
             self.readNum.extend([None] * 150)
@@ -102,7 +122,6 @@ class Position(object):
         self.famSizes[self.depth] = size
         self.posParent[self.depth] = posParent
         self.mapStrand[self.depth] = mapStrand
-        self.distToEnd[self.depth] = dist
         self.mappingQual[self.depth] = mapQual
         self.readNum[self.depth] = readNum
         self.readName[self.depth] = readName
@@ -110,15 +129,13 @@ class Position(object):
 
         # Does this base support a variant?
         if self.ref != "N" and self.ref != base:
-            self.alt = True
             try:
                 self.altAlleles[base] += 1
             except KeyError:
                 self.altAlleles[base] = 1
             self.altDepth += 1
-            return True
-        else:
-            return False
+            return True  # Is variant
+        return False # Is not a variant
 
     def addMismatchNum(self, misMatchNum):
         self.mismatchNum[self.depth - 1] = misMatchNum
@@ -172,8 +189,8 @@ class Position(object):
         # Since the features of this position are "paired" (i.e. index 0 of each list corresponds to the statistics
         # of the same read), cycle through all stored attributes
         i = -1
-        for base, qual, famSize, posParent, map, distToEnd, mismatchNum, mapQual, readID, readName \
-                in zip(self.alleles, self.qualities, self.famSizes, self.posParent, self.mapStrand, self.distToEnd,
+        for base, qual, famSize, posParent, map, mismatchNum, mapQual, readID, readName \
+                in zip(self.alleles, self.qualities, self.famSizes, self.posParent, self.mapStrand,
                        self.mismatchNum, self.mappingQual, self.readNum, self.readName):
 
             i += 1
@@ -200,7 +217,6 @@ class Position(object):
                     readNameIndex[readName] = i
                     del readNameBaseIndex[otherBase][readName]
                     readNameBaseIndex[base][readName] = i
-                    depth -= 1
                 elif qual < otherQual:  # The other read has a higher quality score. Ignore this one
                     continue
                 else:
@@ -212,7 +228,6 @@ class Position(object):
                         readNameIndex[readName] = i
                         del readNameBaseIndex[otherBase][readName]
                         readNameBaseIndex[base][readName] = i
-                        depth -= 1
                     else:
                         # In the case of a tie, use the reference base to be conservative
                         if otherBase == self.ref:
@@ -221,7 +236,6 @@ class Position(object):
                             readNameIndex[readName] = i
                             del readNameBaseIndex[otherBase][readName]
                             readNameBaseIndex[base][readName] = i
-                            depth -= 1
                         else:  # Both bases have the same quality score, and support different alternate alleles
                             # Choose the alternate allele with the most support
                             try:
@@ -238,12 +252,12 @@ class Position(object):
                                 readNameIndex[readName] = i
                                 del readNameBaseIndex[otherBase][readName]
                                 readNameBaseIndex[base][readName] = i
-                                depth -= 1
                             else:
                                 # These bases have the same quality score, and support different alternate alleles which
                                 # are equally supported
                                 # I give up. Just take the first read encountered
-                                continue
+                                pass
+                continue
 
             else:
                 # This is the first time we have encountered this read name. Store it, in case we encounter the mate
@@ -347,33 +361,29 @@ class Position(object):
         self.molecDepth = sum(len(readNameBaseIndex[x]) for x in readNameBaseIndex)
         self.alleleMismatch = {}
         self.alleleAvFamSize = {}
-        self.alleleEndDist = {}
 
         # Process each variant allele individually
         for base, reads in readNameBaseIndex.items():
             if not reads:  # i.e. the dictionary is empty. There are no reads which support this allele. Use placeholder values
-                self.alleleMapQual[base] = (0)
-                self.alleleBaseQual[base] = (0)
+                self.alleleMapQual[base] = (0,)
+                self.alleleBaseQual[base] = (0,)
                 self.alleleStrandBias[base] = 1
                 self.alleleVafs[base] = 0
-                self.alleleMismatch[base] = (0)
-                self.alleleAvFamSize[base] = (0)
-                self.alleleEndDist[base] = (0)
+                self.alleleMismatch[base] = (0,)
+                self.alleleAvFamSize[base] = (0,)
+
             else:
                 self.alleleMapQual[base] = tuple(self.mappingQual[x] for x in reads.values())
                 self.alleleBaseQual[base] = tuple(self.qualities[x] for x in reads.values())
                 self.alleleMismatch[base] = tuple(self.mismatchNum[x] for x in reads.values())
                 self.alleleAvFamSize[base] = tuple(self.famSizes[x] for x in reads.values())
-                self.alleleEndDist[base] = tuple(self.distToEnd[x] for x in reads.values())
                 # Calculate strand bias
-                self.alleleStrandBias[base] = fisher_exact(self.pMapStrand[base], self.nMapStrand[base],
-                                                      sum(self.pMapStrand[x] for x in ("A", "C", "G", "T")),
-                                                       sum(self.nMapStrand[x] for x in ("A", "C", "G", "T"))).two_tail
+                self.alleleStrandBias[base] = fisher_exact([[self.pMapStrand[base], self.nMapStrand[base]],
+                                                     [self.pMapStrand[self.ref], self.nMapStrand[self.ref]]])[1]
 
                 counts = len(reads.values())
                 self.strandCounts[base] = counts
                 self.alleleVafs[base] = counts / self.molecDepth
-
 
         # If no alternate alleles pass the minimum depth filter, than this position is not a real variant
         failedDepth = []
@@ -428,20 +438,20 @@ class IndelPos(object):
     Only stores variant positions, not reference positions
     """
 
-    __slots__ = ("alleles", "qualities", "famSizes", "posParent", "mapStrand", "distToEnd", "mismatchNum",
+    __slots__ = ("alleles", "qualities", "famSizes", "posParent", "mapStrand", "mismatchNum",
                  "mappingQual", "readNum", "readName", "alt", "altAlleles", "depth", "altDepth",
                  "leftWindow", "ref", "rightWindow", "nearbyVar", "nWindow", "baseCounts",
                  "alleleStrongCounts", "strandCounts", "posMolec", "negMolec", "pMapStrand", "nMapStrand",
                  "alleleMapQual", "alleleBaseQual", "alleleStrandBias", "alleleVafs", "molecDepth", "alleleMismatch",
-                 "alleleAvFamSize", "alleleEndDist", "type", "length", "alt", "disagreeingDuplexes", "duplexCounts")
+                 "alleleAvFamSize", "type", "length", "alt", "disagreeingDuplexes", "duplexCounts")
 
-    def __init__(self, type, length, alt=None):
+    def __init__(self, type, length, ref=None):
 
         self.type = type  # Is this an insertion or deletion?
         self.length = length  # How long is this event?
 
-        self.ref = None
-        self.alt = alt
+        self.ref = ref
+        self.alt = None
 
         # Statistics coresponding to the reads which support this event
         self.alleles = [None] * 5
@@ -449,7 +459,6 @@ class IndelPos(object):
         self.famSizes = [None] * 5
         self.posParent = [None] * 5
         self.mapStrand = [None] * 5
-        self.distToEnd = [None] * 5
         self.mismatchNum = [None] * 5
         self.mappingQual = [None] * 5
         self.readNum = [None] * 5
@@ -457,7 +466,7 @@ class IndelPos(object):
         self.depth = 0
         self.altDepth = 0
 
-    def add(self, allele, qual, posParent, famSize, mapStrand, mapQual, dist, readNum, readName, isAlt=False):
+    def add(self, allele, qual, posParent, famSize, mapStrand, mapQual, readNum, readName, isAlt=False):
 
         # Add a new base, as well as the corresponding characteristics, to this position
         try:
@@ -468,7 +477,6 @@ class IndelPos(object):
             self.famSizes.extend([None] * 100)
             self.posParent.extend([None] * 100)
             self.mapStrand.extend([None] * 100)
-            self.distToEnd.extend([None] * 100)
             self.mismatchNum.extend([None] * 100)
             self.mappingQual.extend([None] * 100)
             self.readNum.extend([None] * 100)
@@ -478,7 +486,6 @@ class IndelPos(object):
         self.famSizes[self.depth] = famSize
         self.posParent[self.depth] = posParent
         self.mapStrand[self.depth] = mapStrand
-        self.distToEnd[self.depth] = dist
         self.mappingQual[self.depth] = mapQual
         self.readNum[self.depth] = readNum
         self.readName[self.depth] = readName
@@ -555,8 +562,8 @@ class IndelPos(object):
         # Since the characteristics of each read is in order (i.e. index 0 corresponds to the first read that overlaps
         # this position for every list, cycle through all stored attributes
         i = -1
-        for base, qual, fSize, posParent, map, distToEnd, mismatchNum, mapQual, readID, readName \
-                in zip(self.alleles, self.qualities, self.famSizes, self.posParent, self.mapStrand, self.distToEnd, self.mismatchNum, self.mappingQual, self.readNum, self.readName):
+        for base, qual, fSize, posParent, map, mismatchNum, mapQual, readID, readName \
+                in zip(self.alleles, self.qualities, self.famSizes, self.posParent, self.mapStrand, self.mismatchNum, self.mappingQual, self.readNum, self.readName):
 
             # If this base is None, then we have started reading into the buffer, and should stop processing bases
             if base is None:
@@ -589,12 +596,10 @@ class IndelPos(object):
                     readNameIndex[readName] = i
                     readNameBaseIndex["REF"][readName] = i
                     try:
-                        depth -= 1
                         del readNameBaseIndex["ALT"][readName]
                     except KeyError:
                         pass
-                else:
-                    continue
+                continue  # We don't need to process this read, as the overlapping read was already processed
 
             else:
                 readNameIndex[readName] = i
@@ -706,8 +711,7 @@ class IndelPos(object):
         self.alleleVafs = {}
         self.alleleMismatch = {}
         self.alleleAvFamSize = {}
-        self.alleleEndDist = {}
-        self.molecDepth = sum(len(readNameBaseIndex[x]) for x in readNameBaseIndex)
+        self.molecDepth = depth
         # Since this is an indel, we need to generate a consensus for the indel sequence
         # The consensus will be the most frequent size, and the consensus sequence (insertions only)
         refSeq = ""
@@ -723,7 +727,6 @@ class IndelPos(object):
                 self.alleleVafs[base] = 0
                 self.alleleMismatch[base] = [0]
                 self.alleleAvFamSize[base] = [0]
-                self.alleleEndDist[base] = [0]
             else:
                 if base == "ALT":
                     # Is this an insertion? Or deletion
@@ -736,7 +739,7 @@ class IndelPos(object):
                                 break
                             except IndexError:
                                 continue
-                        self.alleleBaseQual[base] = delBaseQual
+                        self.alleleBaseQual[base] = (delBaseQual,)
                     else:  # Insertion
                         # The inserted seq is stored in "alleles"
                         # Generate a consensus
@@ -770,13 +773,13 @@ class IndelPos(object):
                         except IndexError:  # i.e. the reads which supported the indel were not counted, likely due to duplex handling
                             return False
                         # Take an average of the quality scores
-                        self.alleleBaseQual[base] = int(mean(altQual))
+                        self.alleleBaseQual[base] = (int(mean(altQual)),)
                 else:
                     self.alleleBaseQual[base] = tuple(self.qualities[x] for x in reads.values())
                 self.alleleMapQual[base] = tuple(self.mappingQual[x] for x in reads.values())
 
                 # Calculate strand bias
-                self.alleleStrandBias[base] = fisher_exact(self.pMapStrand[base], self.nMapStrand[base], sum(self.pMapStrand[x] for x in ("ALT", "REF")), sum(self.nMapStrand[x] for x in ("ALT", "REF"))).two_tail
+                self.alleleStrandBias[base] = fisher_exact([[self.pMapStrand[base], self.nMapStrand[base]], [self.pMapStrand["REF"], self.nMapStrand["REF"]]])[1]
 
                 counts = len(reads.values())
                 self.strandCounts[base] = counts
@@ -785,7 +788,6 @@ class IndelPos(object):
                 # Aggregate remaining stats
                 self.alleleMismatch[base] = tuple(self.mismatchNum[x] for x in reads.values())
                 self.alleleAvFamSize[base] = tuple(self.famSizes[x] for x in reads.values())
-                self.alleleEndDist[base] = tuple(self.distToEnd[x] for x in reads.values())
 
         # Finally, finalize the reference and alternate alleles for this event
         if self.type == "D":
@@ -842,13 +844,18 @@ class PileupEngine(object):
     """
 
     def __init__(self, inBAM, refGenome, targetRegions, minAltDepth=1, homopolymerWindow=7, noiseWindow=150,
-                 pileupWindow=1000, oBAM=None, printPrefix="DELLINGR-CALL\t", softClipUntilIndel=25):
+                 pileupWindow=1000, oBAM=None, normalBAM=None, printPrefix="DELLINGR-CALL\t", softClipUntilIndel=25):
         try:
             self._inFile = pysam.AlignmentFile(inBAM, require_index=True)
+            if normalBAM:
+                self._normalFile = pysam.AlignmentFile(normalBAM, require_index=True)
+            else:
+                self._normalFile = None
         except FileNotFoundError as e:
             raise pe.IndexNotFound("Unable to locate BAM index \'%s.bai\': No such file or directory" % inBAM) from e
         self._refGenome = Fasta(refGenome, read_ahead=20000)
         self._captureSpace = self._loadCaptureSpace(targetRegions)
+        # self._mappability = self._loadMappabilityWig(mappabilityTrack)
         self.candidateIndels = {}
         self.rawIndels = {}
         self.pileup = {}
@@ -868,7 +875,7 @@ class PileupEngine(object):
         self._refWindow = ""
 
         self._bufferPos = 0
-        self._realignBuffer = 600
+        self._realignBuffer = 800
 
         # For local realignment
         self._indelReads = []
@@ -953,6 +960,78 @@ class PileupEngine(object):
             sys.stderr.write("Ensure the file is a valid BED file, and try again\n")
             exit(1)
 
+
+    def _loadMappabilityWig(self, mapFile):
+        """
+        Loads a mappability wiggle file
+
+        The mappability track is used when variant filtering to determine if a set of reads are likely mismapped.
+
+        File format:
+        fixedStep chrom=chr1 start=1 step=1000 span=1000
+        0
+        0
+        0
+        0
+        0
+
+        :param mapFile: A string containing a filepath to a wiggle file
+        :return:
+        """
+
+        # For everyone's sanity, we are going to assume that the user could use files which
+        # contain a mix of chr prefix and no chr prefix
+        # Is the BAM chr prefixed?
+        # Check the first reference sequence listed in the BAM header. This isn't perfect, but it should handle most cases
+        isChrPrefixed = self._inFile.header["SQ"][0]["SN"].startswith("chr")
+
+        mappability = {}  # Store as "{chromosome: {windowStart: mappability}}
+
+        with open(mapFile) as f:
+
+            windowStart = 0
+            step = 0
+            chrom = 0
+            for line in f:
+                try:  # If this is the mappability value, it will be a number
+                    # Move window
+                    mapVal = float(line)  # Python automatically ignores newlines during conversion, so we do not need to strip those
+                    mappability[chrom][windowStart] = mapVal
+                    windowStart += step
+
+                except ValueError:  # A header line specifying the chromosome and step
+                    # Parse the header line
+                    cols = line.split()
+                    # Sanity check
+                    if cols[0] != "fixedStep":
+                        raise AttributeError("Mappability file \'%s\' does not appear to be a UCSC wiggle file" % mapFile)
+                    for col in cols:
+                        if col == "fixedStep":
+                            continue
+                        else:
+                            attribute, value = col.split("=")
+                            if attribute == "chrom":
+                                # Match the chr prefix status of the BAM file
+                                if value.startswith("chr"):
+                                    if isChrPrefixed:
+                                        chrom = value
+                                    else:  # Strip chr prefix
+                                        chrom = value.replace("chr", "")
+                                else:  # Wiggle is not chr prefixed
+                                    if isChrPrefixed:
+                                        chrom = "chr" + value
+                                    else:
+                                        chrom = value
+                                mappability[chrom] = {}
+                            elif attribute == "start":
+                                windowStart = int(value)
+                            elif attribute == "step":
+                                step = int(value)
+                            else:  # We don't need anything else
+                                continue
+
+        return mappability
+
     def _insideCaptureSpace(self, read):
         """
         Does this read fall within our capture space? Note that this excludes soft-clipping
@@ -984,7 +1063,7 @@ class PileupEngine(object):
         header = ["##fileformat=VCFv4.3",  # Mandatory
                   "##source=Dellingr",
                   "##source_version=" + pVer.__version__,
-                  "##analysis_date=" + time.strftime('%Y%m%d'),
+                  "##analysis_date=" + time.strftime('%Y-%m-%d'),
                   "##reference=" + self._refGenome.filename]
 
         # Add the contig information
@@ -1011,7 +1090,9 @@ class PileupEngine(object):
             '##FILTER=<ID=PASS,Description="Variant call confidence is above random forest filter confidence threshold %s">' % (filtThreshold),
             '##FILTER=<ID=LOW_CONF,Description="Variant call confidence is below the random forest filter confidence threshold %s">' % (filtThreshold),
             '##FILTER=<ID=NO_DUPLEX,Description="Variant does not have duplex support. Only used when the duplex filter is enabled">',
-            '##FILTER=<ID=REPEAT,Description="Variant indel is an expansion or contraction of an adjacent repeat">'
+            '##FILTER=<ID=REPEAT,Description="Variant indel is an expansion or contraction of an adjacent repeat">',
+            '##FILTER=<ID=GERMLINE,Description="Variant allele frequency is not significantly higher in the tumour relative to the normal sample">',
+            '##FILTER=<ID=NO_DEPTH_NORMAL,Description="Insufficient depth in the normal to assign a variant as germline or somatic">',
             ])
 
         # Genotype fields
@@ -1020,16 +1101,22 @@ class PileupEngine(object):
         header.append('##FORMAT=<ID=ADF,Number=R,Type=Integer,Description="Number of READS mapped to the forward strand for each allele">')
         header.append('##FORMAT=<ID=ADR,Number=R,Type=Integer,Description="Number of READS mapped to the reverse strand for each allele">')
 
-        header.append("\t".join(["#CHROM", "POS", "ID", "REF", "ALT", "QUAL", "FILTER", "INFO", "FORMAT", "TUMOR" + os.linesep]))
+        vcfFieldNames = ["#CHROM", "POS", "ID", "REF", "ALT", "QUAL", "FILTER", "INFO", "FORMAT", "TUMOR"]
+        if self._normalFile is not None:
+            vcfFieldNames.append("NORMAL")
+
+        header.append("\t".join(vcfFieldNames))
         file.write(os.linesep.join(header))
+        file.write(os.linesep)
 
-
-    def varToFilteringStats(self, pos, allele):
+    def varToFilteringStats(self, pos, allele, chrom, position):
         """
         Summarizes various statistics that a variant is to be filtered based upon
 
         :param pos: A Position or IndelPos object to be filtered
         :param allele: A string containing a nucleotide, or (for IndelPos) "REF" or "ALT", which is the allele to be filtered
+        :param chrom: A string specifying the contig name of this variant
+        :param position: An int specifying the genomic position of the variant
         :return: A tuple containing the various variant stats
         """
 
@@ -1043,38 +1130,33 @@ class PileupEngine(object):
 
             # Mean base quality
             meanBaseQual = mean(pos.alleleBaseQual[allele])
-            # Calculate differences in base quality btwn reference and alternate alleles
-            try:
+            # Calculate differences in base quality between reference and alternate alleles
+            if pos.strandCounts[ref] > 2:
                 baseQualBias = ttest_ind(pos.alleleBaseQual[ref], pos.alleleBaseQual[allele], equal_var=False).pvalue
                 if baseQualBias != baseQualBias:  #i.e the base quality bias is NaN. Set it to 1
                     baseQualBias = 1
-            except FloatingPointError:
+            else:
                 baseQualBias = 1
 
-        # Calculate differences in read mapping quality between reference and alternate alleles
-        try:
-            mapQualBias = ttest_ind(pos.alleleMapQual[ref], pos.alleleMapQual[allele], equal_var=False).pvalue
-            if mapQualBias != mapQualBias:
-                mapQualBias = 1
-        except FloatingPointError:
+        # If few reads support the reference allele, we can just set all bias values to 1, since there there are too
+        # few reads to actually calculate the p-value
+        if pos.strandCounts[ref] < 2:
             mapQualBias = 1
-
-        # Quantify differences in the number of mismatches supported by each read
-        try:
+            mismatchBias = 1
+            fSizeBias = 1
+        else:
+            # Calculate differences in read mapping quality between reference and alternate alleles
+            mapQualBias = ttest_ind(pos.alleleMapQual[ref], pos.alleleMapQual[allele], equal_var=False).pvalue
+            if mapQualBias != mapQualBias:  # i.e. this is nan
+                mapQualBias = 1
+            # Quantify differences in the number of mismatches supported by each read
             mismatchBias = ttest_ind(pos.alleleMismatch[ref], pos.alleleMismatch[allele], equal_var=False).pvalue
             if mismatchBias != mismatchBias:
                 mismatchBias = 1
-        except FloatingPointError:
-            mismatchBias = 1
-
-        # Quantify differences between the family size supporting the reference and alternate alleles
-        try:
+            # Quantify differences between the family size supporting the reference and alternate alleles
             fSizeBias = ttest_ind(pos.alleleAvFamSize[ref], pos.alleleAvFamSize[allele], equal_var=False).pvalue
             if fSizeBias != fSizeBias:
                 fSizeBias = 1
-        except FloatingPointError:
-            fSizeBias = 1
-
         # Does this mutation indicate DNA damage?
         # C -> A and G -> T mutations are commonly affiliated with DNA damage
         try:
@@ -1085,6 +1167,11 @@ class PileupEngine(object):
         except AttributeError:  # i.e. this is an indel. This filter does not apply
             dnaDamageMut = False
 
+        # What is the mappability of the reference genome in this position?
+        # Determine this using the mappability tract
+        #mapBins = list(self._mappability[chrom].keys())
+        #mappabilityIndex = bisect.bisect_left(mapBins, position) - 1
+        #refMappability = self._mappability[chrom][mapBins[mappabilityIndex]]
 
         posStats = (
             pos.strandCounts[allele],
@@ -1100,14 +1187,14 @@ class PileupEngine(object):
             mismatchBias,
             mean(pos.alleleAvFamSize[allele]),
             fSizeBias,
-            mean(pos.alleleEndDist[allele]),
             pos.duplexCounts[allele],
             dnaDamageMut
         )
 
         return posStats
 
-    def filterAndWriteVariants(self, outFile, filter, unfilteredOut=None, filtThreshold=0.6, onlyDuplex=False, indelRepeatThresh=4, writeHeader=False):
+    def filterAndWriteVariants(self, outFile, filter, unfilteredOut=None, filtThreshold=0.6, onlyDuplex=False, minAltDepth=4,
+                               indelRepeatThresh=4, writeHeader=False):
         """
 
         Filters candidate variants based upon specified characteristics, and writes the output to the output file
@@ -1118,12 +1205,13 @@ class PileupEngine(object):
         :param unfilteredOut: A sting containing a filepath to an output VCF file which will contain ALL variants, even those that do not pass filters
         :param filtThreshold: A float representing the classification threshold in which to filter variants
         :param onlyDuplex: A boolean indicating if only variants with duplex support should pass filters. Not recommended
+        :param minAltDepth: An int indicating the minimum number of unique molecules required to call a variant
         :param indelRepeatThresh: An int indicating the number of times a repeat has to occur before an indel which is an expansion/contraction of this repeat is filtered out
         :param writeHeader: A boolean. If true, any existing file outFile will be overwritten, and a VCF header will be added to the file
         :return:
         """
 
-        def _generateVCFEntry(pos, chrom, start, filterCon, filterField):
+        def _generateVCFEntry(pos, chrom, start, filterCon, filterField, germlineStats = None):
             """
             Generates a VCF entry of the specified variant
 
@@ -1134,15 +1222,18 @@ class PileupEngine(object):
             :param start: An int corresponding to the start position of this variant
             :param filterCon: A string (or iterable of strings) indicating how confident the filter is that this variant is real (btwn 0 and 1)
             :param filterField: A string to be used for the info field
+            :param germlineStats: A VariantStatsInNormal object containg allele counts for this variant in the normal
             :return: A string coresponding to the VCF entry of the provided position
             """
 
             # Is this an indel?
             if isinstance(pos, IndelPos):
                 # If so, we only need to examine one variant
-                qual = pos.alleleBaseQual["ALT"]
+                qual = int(float(filterCon[0]) * 100)
                 alleles = ("REF", "ALT")
                 alt = pos.alt
+                start -= 1  # Since indel entries in VCF files reference the preceeding base, we need to offset the start position by 1
+
             else:
                 # Otherwise, we need to arrange the alternate alleles by their frequency
                 altAlleles = []
@@ -1164,7 +1255,7 @@ class PileupEngine(object):
                 alt = ",".join(altAlleles)
                 alleles = [pos.ref]
                 alleles.extend(altAlleles)
-                qual = int(mean(pos.alleleBaseQual[altAlleles[0]]))
+                qual = ",".join(str(int(float(x) * 100)) for x in filterCon)
 
             # Generate an info column for this variant
             info = []
@@ -1183,6 +1274,16 @@ class PileupEngine(object):
                 ",".join(str(pos.pMapStrand[x]) for x in alleles),
                 ",".join(str(pos.nMapStrand[x]) for x in alleles)
             ]
+
+            if germlineStats is not None:
+                normalGenotype = [
+                    str(sum(x for x in germlineStats.alleleCounts.values())),
+                    ",".join(str(germlineStats.alleleCounts[x]) for x in alleles),
+                    ",".join(str(germlineStats.posStrandCounts[x]) for x in alleles),
+                    ",".join(str(germlineStats.negStrandCounts[x]) for x in alleles)
+                ]
+            else:
+                normalGenotype = None
             variant =   [chrom,  # CHROM
                         str(start + 1),   # POS, add 1 to account for differences in indexing btwn pysam and vcf spec
                         ".",     # ID  (No ID)
@@ -1194,6 +1295,8 @@ class PileupEngine(object):
                          self._genotypeFormat,  # Genotype format field
                          ":".join(genotype) # GENOTYPE
                         ]
+            if normalGenotype is not None:
+                variant.append(":".join(normalGenotype))  # Genotype of the normal sample
 
             return "\t".join(variant) + os.linesep
 
@@ -1220,12 +1323,12 @@ class PileupEngine(object):
                         posToDelete = []
                         for iPos in self.candidateIndels[chrom].irange(maximum = position, inclusive=(True, False)):
                             indel = self.candidateIndels[chrom][iPos]
-                            altAllele = indel.summarizeVariant()
+                            altAllele = indel.summarizeVariant(minAltDepth=minAltDepth)
 
                             if altAllele:  # Passed basic alt depth filters
 
                                 # Filter indel
-                                stats = [self.varToFilteringStats(indel, "ALT")]
+                                stats = [self.varToFilteringStats(indel, "ALT", chrom, iPos)]
                                 filterResults = filter.predict_proba(stats)[0][0]
 
                                 passesConfFilter = True
@@ -1257,11 +1360,29 @@ class PileupEngine(object):
                                         filterField = "REPEAT"
                                     else:
                                         filterField = filterField + ";REPEAT"
+
+                                # Is this event germline?
+                                isGermline = False
+                                germlineCounts = None
+                                if self._normalFile is not None:
+                                    germlineCounts = self._checkIfGermlineIndel(chrom, iPos, indel)
+                                    isGermline = germlineCounts.isGermline
+                                    if germlineCounts.isGermline is True:
+                                        if filterField == "PASS":
+                                            filterField = "GERMLINE"
+                                        else:
+                                            filterField = filterField + ";GERMLINE"
+                                    elif germlineCounts.isGermline is None:  # Insufficient depth in normal.
+                                        if filterField == "PASS":
+                                            filterField = "NO_DEPTH_NORMAL"
+                                        else:
+                                            filterField = filterField + ";NO_DEPTH_NORMAL"
+
                                 # Write out the unfiltered variant
-                                vcfEntry = _generateVCFEntry(indel, chrom, iPos, [str(filterResults)], filterField)
+                                vcfEntry = _generateVCFEntry(indel, chrom, iPos, [str(filterResults)], filterField, germlineCounts)
                                 u.write(vcfEntry)
 
-                                if passesConfFilter and duplexSupportFilt:  # This variant passes filters
+                                if passesConfFilter and duplexSupportFilt and isGermline is False:  # This variant passes filters
                                     o.write(vcfEntry)
 
                             posToDelete.append(iPos)
@@ -1269,22 +1390,33 @@ class PileupEngine(object):
                             if self.varCount % 10000 == 0:
                                 sys.stderr.write(
                                     "\t".join([self._printPrefix, time.strftime('%X'),
-                                               chrom + ":Positions Filtered:" + str(self.varCount) + "\n"]))
+                                               chrom, "Positions Filtered:" + str(self.varCount) + "\n"]))
 
                         # Delete to reduce memory usage
                         for iPos in posToDelete:
                             del self.candidateIndels[chrom][iPos]
                     except KeyError:  # i.e. There are no indels on this chromosome
                         pass
+                    except ValueError as e:
+                        # The number of variant features does not match the number of features in the variant classifier
+                        # It is likely that the user is using an old filter
+                        raise AttributeError("It appears that the variant classifier specified with "
+                                             "\'-f/--filter\' is obsolete. Try using the default variant classifier") from e
 
-                    altAllele = candidateSNV.summarizeVariant()
+                    altAllele = candidateSNV.summarizeVariant(minAltDepth=minAltDepth)
                     self.varCount += 1
                     if altAllele:
 
                         # Summarize the filter stats of each allele
-                        alleleStats = tuple(self.varToFilteringStats(candidateSNV, allele) for allele in candidateSNV.altAlleles.keys())
+                        alleleStats = tuple(self.varToFilteringStats(candidateSNV, allele, chrom, position) for allele in candidateSNV.altAlleles.keys())
 
-                        filterResults = filter.predict_proba(alleleStats)
+                        try:
+                            filterResults = filter.predict_proba(alleleStats)
+                        except ValueError as e:
+                            # The number of variant features does not match the number of features in the variant classifier
+                            # It is likely that the user is using an old filter
+                            raise AttributeError("It appears that the variant classifier specified with "
+                                                 "\'-f/--filter\' is obsolete. Try using the default variant classifier") from e
 
                         # Filter alleles
                         failedAlleles = []
@@ -1309,8 +1441,24 @@ class PileupEngine(object):
                                     filterField = filterField + ";NO_DUPLEX"
                                 else:
                                     filterField = "NO_DUPLEX"
+                            # Is this variant germline? Check if it's in the normal sample (if provided)
+                            isGermline = False
+                            germlineCounts = None
+                            if self._normalFile is not None:
+                                germlineCounts = self._checkIfGermlineSNV(chrom, position, allele, candidateSNV)
+                                isGermline = germlineCounts.isGermline
+                                if isGermline is True:
+                                    if filterField == "PASS":
+                                      filterField = "GERMLINE"
+                                    else:
+                                        filterField = filterField + ";GERMLINE"
+                                elif isGermline is None:  # Insufficient depth in normal.
+                                    if filterField == "PASS":
+                                        filterField = "NO_DEPTH_NORMAL"
+                                    else:
+                                        filterField = filterField + ";NO_DEPTH_NORMAL"
 
-                            if not passesConfFilter or not duplexSupportFilt:  # Fails duplex support filter
+                            if not passesConfFilter or not duplexSupportFilt or isGermline is True or isGermline is None:  # Fails one or more filters
                                 failedAlleles.append(allele)
                             else:
                                 passFiltResults.append(filterField)
@@ -1318,7 +1466,7 @@ class PileupEngine(object):
                             allFiltResults.append(filterField)
                             allFiltConf.append(result)
 
-                        vcfEntry = _generateVCFEntry(candidateSNV, chrom, position, allFiltConf, ";".join(allFiltResults))
+                        vcfEntry = _generateVCFEntry(candidateSNV, chrom, position, allFiltConf, ";".join(allFiltResults), germlineCounts)
                         u.write(vcfEntry)
 
                         # Remove failed alleles
@@ -1327,7 +1475,7 @@ class PileupEngine(object):
 
                         # If any alt alleles passed filters, print them out
                         if candidateSNV.altAlleles:
-                            vcfEntry = _generateVCFEntry(candidateSNV, chrom, position, passFiltConf, ";".join(passFiltResults))
+                            vcfEntry = _generateVCFEntry(candidateSNV, chrom, position, passFiltConf, ";".join(passFiltResults), germlineCounts)
                             o.write(vcfEntry)
 
                     del positions[position]  # Delete variants after processing them to reduce memory consumption
@@ -1336,15 +1484,15 @@ class PileupEngine(object):
                     if self.varCount % 10000 == 0:
                         sys.stderr.write(
                             "\t".join([self._printPrefix, time.strftime('%X'),
-                                       chrom + ":Positions Filtered:" + str(self.varCount) + "\n"]))
+                                       chrom, "Positions Filtered:" + str(self.varCount) + "\n"]))
                 # Process any remaining indels on this chromosome
                 try:
                     for iPos, indel in self.candidateIndels[chrom].items():
-                        altAllele = indel.summarizeVariant()
+                        altAllele = indel.summarizeVariant(minAltDepth=minAltDepth)
 
                         if altAllele:
                             # Filter indel
-                            stats = [self.varToFilteringStats(indel, "ALT")]
+                            stats = [self.varToFilteringStats(indel, "ALT", chrom, iPos)]
                             filterResults = filter.predict_proba(stats)[0][0]
 
                             passesConfFilter = True
@@ -1377,23 +1525,47 @@ class PileupEngine(object):
                                     filterField = "REPEAT"
                                 else:
                                     filterField = filterField + ";REPEAT"
+
+                            # Is this event germline?
+                            isGermline = False
+                            germlineCounts = None
+                            if self._normalFile is not None:
+                                germlineCounts = self._checkIfGermlineIndel(chrom, iPos, indel)
+                                isGermline = germlineCounts.isGermline
+                                if germlineCounts.isGermline is True:
+                                    if filterField == "PASS":
+                                        filterField = "GERMLINE"
+                                    else:
+                                        filterField = filterField + ";GERMLINE"
+                                elif germlineCounts.isGermline is None:  # Insufficient depth in normal.
+                                    if filterField == "PASS":
+                                        filterField = "NO_DEPTH_NORMAL"
+                                    else:
+                                        filterField = filterField + ";NO_DEPTH_NORMAL"
+
                             # Write out the unfiltered variant
-                            vcfEntry = _generateVCFEntry(indel, chrom, iPos, [str(filterResults)], filterField)
+                            vcfEntry = _generateVCFEntry(indel, chrom, iPos, [str(filterResults)], filterField, germlineCounts)
                             u.write(vcfEntry)
 
-                            if passesConfFilter and duplexSupportFilt:  # This variant passes filters
+                            if passesConfFilter and duplexSupportFilt and isGermline is False:  # This variant passes filters
                                 o.write(vcfEntry)
 
                     del self.candidateIndels[chrom]
                 except KeyError:
                     pass
+                except ValueError as e:
+                    # The number of variant features does not match the number of features in the variant classifier
+                    # It is likely that the user is using an old filter
+                    raise AttributeError("It appears that the variant classifier specified with "
+                                         "\'-f/--filter\' is obsolete. Try using the default variant classifier") from e
+
             # Finally, process any indels on remaining contigs
             for chrom in self.candidateIndels:
                 for iPos, indel in self.candidateIndels[chrom].items():
-                    hasAlt = indel.summarizeVariant()
+                    hasAlt = indel.summarizeVariant(minAltDepth=minAltDepth)
                     if hasAlt:
                         # Filter indel
-                        stats = [self.varToFilteringStats(indel, "ALT")]
+                        stats = [self.varToFilteringStats(indel, "ALT", chrom, iPos)]
                         filterResults = filter.predict_proba(stats)[0][0]
 
                         passesConfFilter = True
@@ -1447,7 +1619,31 @@ class PileupEngine(object):
         :return: A boolean indicating if a repeat occurs
         """
 
-        seqLength = len(seq)
+        # There are quite a few repetative indels which actually expansion or contractions of a repeat more than once
+        # i.e. For reference CTTTTTCTTTTTCTTTTTCTTTTTCTTTTT, there may be an insertion that is "CTTTTTCTTTTT"
+        # To flag these cases, try to find the longest unique sequence of an indel
+        uniqueSeq = seq
+        if len(set(seq))!= 1: # Skip homopolymers
+            for i in range(2, int(len(seq)/2) + 1):
+                substringMatch = True
+                testSeq = seq[0:i]
+                start = 0
+                end = 0
+                while True:
+                    start = end
+                    end = start + i
+                    subSeq = seq[start:end]
+                    if subSeq == "":
+                        break
+                    if seq[start:end] != testSeq:
+                        substringMatch = False
+                        break
+
+                # Is this string a repetative substring of the full indel sequence?
+                if substringMatch:
+                    uniqueSeq = testSeq
+                    break
+        seqLength = len(uniqueSeq)
         if offsetSearch:
             position = position + seqLength
 
@@ -1462,21 +1658,228 @@ class PileupEngine(object):
         for j in range(threshold):
             cPos = j * seqLength
             cEnd = cPos + seqLength
-            if refSeq[cPos:cEnd] != seq: # This sequence does not match. This sequence does not occur the specified number of times
+            if refSeq[cPos:cEnd] != uniqueSeq: # This sequence does not match. This sequence does not occur the specified number of times
                 return False
 
         # The specified seq occurs more than threshold number of times
         return True
 
-    def processRead(self, read, rCigar):
+    def _checkIfGermlineSNV(self, chrom, position, altAllele, altPosition, minReadThreshold=6, vafThreshold=0.055, minBaseQual=13):
+        """
+        Determines if a given snv is a germline mutation
+
+        Calculates the VAF of this mutation in the germline sample. If the VAF is above the specified threshold, this
+        variant is flagged as germline
+
+        The default VAF threshold was set be examining the VAF distribution of alternate alleles in normal samples. The
+        base quality threshold was chosen to not accidentally flag noisy positions as germline. This filter is not designed
+        to filter out artifact variants
+
+        WARNING: This implementation is VERY basic for performance and code maintenance readsons. It will not take into
+        account family sizes or any duplexes. That said, if the normal BAM was collapsed, each family will only be
+        counted once
+
+        :param chrom: A string indicating the name of the contig the read is mapped against
+        :param position: An integer indicating the position of the variant in the specified contig
+        :param altAllele: A string containing the alternate allele
+        :param altPosition: A position() object containing the variant position and aggregated stats
+        :param minReadThreshold: An int indicating the minimum normal depth required to confidently assign a variant as germline or not
+        :param vafThreshold: A float. If the VAF in the normal sample is higher than this threshold, the variant is flagged as germline
+        :param minBaseQual: An int specifying the minimum base quality to count a base
+        :return: A VariantStatsInNormal object containing the allele counts for this variant in the normal, and if the variant is considered germline
+        """
+
+        # Count the number of reads which support the reference and alternate alleles in the normal
+        refAllele = altPosition.ref
+        alleleCounts = {"A": 0, "C":0, "G":0, "T":0}
+        negStrandCounts = {"A": 0, "C":0, "G":0, "T":0}
+        posStrandCounts = {"A": 0, "C":0, "G":0, "T":0}
+        pileup = self._normalFile.pileup(contig=chrom, start=position, stop=position+1, maxDepth=20000, min_base_quality = minBaseQual)
+        for pileupPos in pileup:
+            # Since pysam's pileup generates an iterable of all positions covered by reads which overlap the specified
+            # position, we need to go to the position we care about
+            if pileupPos.pos == position:
+                # Obtain the base by all reads which overlap this position
+                for read in pileupPos.pileups:
+                    # If this read has a deletion at this position, don't count it
+                    if read.query_position is None:
+                        continue
+
+                    base = read.alignment.query_sequence[read.query_position]
+                    if base not in alleleCounts:
+                        alleleCounts[base] = 0
+                    alleleCounts[base] += 1
+                    # Add the strand count information
+                    if read.alignment.is_reverse:  # Maps to the negative strand
+                        if base not in negStrandCounts:
+                            negStrandCounts[base] = 0
+                        negStrandCounts[base] += 1
+                    else: # The read maps to the positive strand
+                        if base not in posStrandCounts:
+                            posStrandCounts[base] = 0
+                        posStrandCounts[base] += 1
+
+        # Parse allele counts
+        refCount = alleleCounts[refAllele]
+        altCount = alleleCounts[altAllele]
+        isGermline = None
+
+        # Is there sufficient normal depth?
+        if refCount + altCount < minReadThreshold:
+            isGermline = None
+        else:
+            # Calculate the VAF of the mutation in the normal
+            try:
+                normVaf = altCount / (refCount + altCount)
+            except ZeroDivisionError:
+                normVaf = 0
+            # Based on the VAF, is this variant germline?
+            if normVaf > vafThreshold:  # Germline
+                isGermline = True
+            else:
+                isGermline = False
+
+        # Generate an object which stores the germline allele counts for this variant
+        normVar = VariantStatsInNormal(alleleCounts, negStrandCounts, posStrandCounts, isGermline)
+        return normVar
+
+
+    def _checkIfGermlineIndel(self, chrom, position, altPosition, pValThresh=0.05, minReadThreshold=6, sequenceWindow=200, minVafThreshold=0.03):
+        """
+        Determines if a given indel is a germline mutation
+
+        Performs local realignment of the reads in the matched normal which could overlap this indel. Creates a haplotype
+        for the reference and alternate alleles, then maps all reads against those alleles to determine the best mappings
+
+        :param chrom: A string indicating the name of the contig the read is mapped against
+        :param position: An integer indicating the position of the variant in the specified contig
+        :param altPosition: A position() object containing the variant position and aggregated stats
+        :param pValThresh: A float indicating the p-value threshold. If the fisher's pvalue is above this threshold, the variant is flagged as germline
+        :param minReadThreshold: An int indicating the minimum normal depth required to confidently assign a variant as germline or not
+        :param minVafThreshold: A float. If the VAF in the normal sample is higher than this threshold, the variant is flagged as germline
+        :return: A VariantStatsInNormal object, containg the allele counts for the reference and alternate genotype
+        """
+
+        class discountPysamRead:
+            # This is a placeholder for a read, so we can provide a query_sequence
+            def __init__(self, seq, position, length):
+                self.query_sequence = seq
+                self.reference_start = position
+                self.query_alignment_length = length
+
+        # Since reads in the normal could be soft-clipped at this indel, include the soft clipping offset
+        pileupStart = position - self._softClipUntilIndel
+        if pileupStart < 0:
+            pileupStart = 0
+        indelSize = len(altPosition.alt) - len(altPosition.ref)
+        pileupEnd = position - indelSize if indelSize < 0 else position + 1
+        pileupEnd += self._softClipUntilIndel
+        # Parse all reads which overlap this position
+        normalReads = tuple(self._normalFile.fetch(contig=chrom, start=pileupStart, stop=pileupEnd))
+
+        windowStart = pileupStart - sequenceWindow
+        windowEnd = pileupEnd + sequenceWindow
+
+        refWindowStart = windowStart - self._realignBuffer
+        if refWindowStart < 0:
+            refWindowStart = 0
+        refWindowEnd = windowEnd + self._realignBuffer
+
+        # Set the reference buffer correctly so the correct haplotypes are generated
+        self._refWindow = self._refGenome[self._chrom][refWindowStart:refWindowEnd].seq
+        self._refStart = refWindowStart
+
+        # If this is a deletion, remove bases from the sequence
+        if indelSize < 0:
+            altSeq = self._refGenome[chrom][windowStart:position].seq + self._refGenome[chrom][position - indelSize: windowEnd - indelSize].seq
+        else:
+            # Add the insertion into the sequence
+            altSeq = self._refGenome[chrom][windowStart-1:position-1].seq + altPosition.alt + \
+                     self._refGenome[chrom][position: windowEnd].seq
+
+        simRead = discountPysamRead(altSeq, windowStart, windowEnd - windowStart)
+        # Create the relevant haplotypes
+        refHap, altHap = self.generateHaplotypes([simRead], softclippingBuffer=0)
+
+
+        # Align all reads in the normal against these haplotypes, and determine which reads support which haplotype
+        refReads = []
+        altReads = []
+        for read in normalReads:
+            refAlign = refHap.alignmentStructure(read.query_sequence)
+            altAlign = altHap.alignmentStructure(read.query_sequence)
+            # If this read maps equally well to both the reference and alternate haplotype, then it probably doesn't
+            # overlap the indel, and we should ignore it
+            if altAlign.optimal_alignment_score > refAlign.optimal_alignment_score:
+                altReads.append(read.query_name)
+            elif altAlign.optimal_alignment_score < refAlign.optimal_alignment_score:
+                refReads.append(read.query_name)
+
+        # Avoid double-counting any read pairs
+        # In the case that one read supports the reference allele, while the other supports the alternate allele, keep
+        # the read which supports the alternate allele
+        altReads = set(altReads)
+        refReads = set(x for x in refReads if x not in altReads)
+
+        altCount = len(altReads)
+        refCount = len(refReads)
+
+        # Count the number of reads supporting the reference and alternate allele on the + and - strand
+        readCounts = {"REF": refCount, "ALT": altCount}
+        negStrandCounts = {"REF": 0, "ALT": 0}
+        posStrandCounts = {"REF": 0, "ALT": 0}
+        for read in normalReads:
+            if read.query_name in refReads:
+                if read.is_reverse:
+                    negStrandCounts["REF"] += 1
+                else:
+                    posStrandCounts["REF"] += 1
+            elif read.query_name in altReads:
+                if read.is_reverse:
+                    negStrandCounts["ALT"] += 1
+                else:
+                    posStrandCounts["ALT"] += 1
+
+        # Check for sufficient coverage again
+        isGermline = None
+        if altCount + refCount < minReadThreshold:
+            isGermline = None
+        else:
+            # Calculate normal VAF
+            normVaf = altCount / (refCount + altCount)
+            # Based on the VAF, can we assign this mutation as somatic or germline?
+            if normVaf > minVafThreshold:
+                isGermline = True
+            # If there is only one read supporting the alternate allele, it is probably an artifact, and not a germline
+            # mutation. For low VAF somatic events, these will be flagged as germline
+            # Thus, flag events with only one read supporting it in the germline as somatic
+            elif altCount < 2:
+                isGermline = False
+            else:
+                # Perform a fisher's exact test to determine the mutation occurs more frequently in the tumour
+                pVal = fisher_exact([[refCount, altCount], [altPosition.strandCounts["REF"], altPosition.strandCounts["ALT"]]], alternative="less")[1]
+                if pVal < pValThresh:
+                    isGermline = False  # Somatic
+                else:
+                    isGermline = True  # Germline
+
+        # Create a variant object to store the allele counts in the normal samples
+        germVar = VariantStatsInNormal(readCounts, negStrandCounts, posStrandCounts, isGermline)
+
+        return germVar
+
+    def processRead(self, read, rCigar, knownMatch = None):
         """
         Add all positions covered by this read to the pileup
 
+        This function is very ugly, but I am trying to be as efficient as possible
+
         :param read: A pysam.AlignedSegment() object
         :param rCigar: A list containing cigar operators
-        :param mismatchMax: The lead length multiplied this is the maximum number of mismatched permitted before the read is flagged as supporting an indel
+        :param knownMatch: A set of positions which were not mismatches before local realignment
         """
 
+        refBases = {"A", "C", "G", "T"}
         if self._oBAM:
             self._oBAM.write(read)
         # Is this read valid? Check the naming scheme of the read, and identify each feature stored in the name
@@ -1519,7 +1922,6 @@ class PileupEngine(object):
         indelQual = []
         lastCigar = 0
         indelSeq = ""
-        indelEndDist = []
         indelRef = ""  # Ref base where the indel starts
 
         try:
@@ -1531,23 +1933,14 @@ class PileupEngine(object):
                 if cigar == 0:  # Matched base
                     # This is the most common case by far
                     base, qual = next(readIterator)
-                    # Calculate the distance from the end of the read for this variant
-                    dist2Start = position - read.reference_start
-                    dist2End = read.reference_end - position
-                    if dist2Start < dist2End:
-                        distFromEnd = dist2Start
-                    else:
-                        distFromEnd = dist2End
 
                     if lastCigar != 1 and lastCigar != 2:
                         # If this position overlaps a candidate indel, we also need to add this position to those indels
                         # But don't do this if the last position was an indel, as we do not want to double-count this read
                         try:
                             if position in self.rawIndels[self._chrom]:
-                                for indel in self.rawIndels[self._chrom][position ].values():
-                                    indel.add(base, qual, rPosParent, rFSize, read.is_reverse, rMappingQual,
-                                              distFromEnd,
-                                              counter,
+                                for indel in self.rawIndels[self._chrom][position].values():
+                                    indel.add(base, qual, rPosParent, rFSize, read.is_reverse, rMappingQual, counter,
                                               read.query_name)
                                     positions.append(indel)
                         except KeyError:
@@ -1559,7 +1952,7 @@ class PileupEngine(object):
                         try:
                             self.rawIndels[self._chrom][indelPos][indelType].add(indelSeq, indelQual, rPosParent,
                                                                                  rFSize, read.is_reverse, rMappingQual,
-                                                                                 indelEndDist, counter, read.query_name,
+                                                                                 counter, read.query_name,
                                                                                  isAlt=True)
                             positions.append(self.rawIndels[self._chrom][indelPos][indelType])
                             if self.rawIndels[self._chrom][indelPos][indelType].ref is None:
@@ -1575,22 +1968,31 @@ class PileupEngine(object):
                     # If this position has not been covered before, we need to generate a new pileup at this position
                     if position not in self.pileup[self._chrom]:
                         refBase = self._refWindow[position - self._refStart]
+                        # If the reference base at this position is degenerate, we should ignore this position,
+                        # as we can not be certain this position is even a variant
+                        if refBase not in refBases:
+                            continue
                         self.pileup[self._chrom][position] = Position(refBase)
 
                     pileupPos = self.pileup[self._chrom][position]
-                    position += 1
 
                     # Ignore bases that are "N"
                     if base == "N":
+                        position += 1
                         continue
-                    isAlt = pileupPos.add(base, qual, rFSize, rPosParent, read.is_reverse, distFromEnd, rMappingQual,
-                                          counter,
+
+                    if knownMatch is not None and position in knownMatch and pileupPos.ref != base:
+                        # This mismatch is an artifact of local realignment. Ignore this base for this read
+                        position += 1
+                        continue
+                    isAlt = pileupPos.add(base, qual, rFSize, rPosParent, read.is_reverse, rMappingQual, counter,
                                           read.query_name)
 
                     # Check to see if this position now has evidence of a variant
                     if isAlt:
                         numMismatch += 1
                     positions.append(pileupPos)
+                    position += 1
 
                 elif cigar == 4:  # Soft clipped. Ignore this
                     next(readIterator)
@@ -1605,8 +2007,7 @@ class PileupEngine(object):
                         indelSeq = self._refWindow[position - self._refStart]
                         indelType = "D"
                         indelQual.append(None)
-                        indelEndDist = min(abs(position - read.reference_start), abs(read.reference_end - position))
-                        indelRef = self._refWindow[position - self._refStart]
+                        indelRef = self._refWindow[position - self._refStart - 1]
                     elif lastCigar == 2:
                         # Continue the previous deletion
                         indelSeq += self._refWindow[position - self._refStart]
@@ -1618,7 +2019,6 @@ class PileupEngine(object):
                         indelQual = []
                         lastCigar = 0
                         indelSeq = ""
-                        indelEndDist = 0
                     position += 1
                     continue
                 elif cigar == 1:  # An insertion.
@@ -1644,7 +2044,6 @@ class PileupEngine(object):
                         indelQual = []
                         lastCigar = 0
                         indelSeq = ""
-                        indelEndDist = 0
                     continue
 
         except IndexError:
@@ -1656,7 +2055,7 @@ class PileupEngine(object):
         for pos in positions:
             pos.addMismatchNum(numMismatch)
 
-    def generateHaplotypes(self, softclippingBuffer=100):
+    def generateHaplotypes(self, indelReads, softclippingBuffer=100):
         """
         Generate a reference using all reads which contain an indel
 
@@ -1664,11 +2063,11 @@ class PileupEngine(object):
         """
 
         # If no reads in this window support an indel, then there are no alternative haplotypes
-        if not self._indelReads:
+        if not indelReads:
             return None
 
-        if not self._bufferedReads or self._indelReads[0].reference_start < self._bufferedReads[0].reference_start:
-            self._bufferPos = self._indelReads[0].reference_start - softclippingBuffer
+        if not self._bufferedReads or indelReads[0].reference_start < self._bufferedReads[0].reference_start:
+            self._bufferPos = indelReads[0].reference_start - softclippingBuffer
             if self._bufferPos < 0:
                 self._bufferPos = 0
             refStart = self._bufferPos - self._refStart
@@ -1679,17 +2078,17 @@ class PileupEngine(object):
             refStart = self._bufferPos - self._refStart
 
         # What is the general length of each read?
-        readLength = self._indelReads[-1].query_alignment_length
+        readLength = indelReads[-1].query_alignment_length
         refEnd = refStart + self._realignBuffer + softclippingBuffer + readLength
 
         referenceSeq = self._refWindow[refStart:refEnd]
-        refHaplotype = Haplotype(referenceSeq, None)
+        refHaplotype = Haplotype(referenceSeq)
 
         candidateHaplotypes = {referenceSeq: refHaplotype}
 
         # First pass: Align all reads against the reference haplotype using SW-alignment to identify any differences
         # between this read and the reference
-        for read in self._indelReads:
+        for read in indelReads:
 
             # Align this read against the reference
             altAlignment = refHaplotype.alignmentStructure(read.query_sequence)
@@ -1715,6 +2114,8 @@ class PileupEngine(object):
                     altHaplotype.append(b1)
                     if eventType:
                         eventLoc[i-eventSize] = [eventSize, eventType]
+                        if eventType == "D":
+                            i -= eventSize
                         eventType = None
                         eventSize = 0
 
@@ -1724,18 +2125,35 @@ class PileupEngine(object):
                 altMatchFound = False
                 for name, haplotype in candidateHaplotypes.items():
                     alignBtwnHap = haplotype.alignmentStructure(altAssembledHaplotype)
-                    if "I" not in alignBtwnHap.cigar and "D" not in alignBtwnHap.cigar:  # i.e. there are no indels between these two haplotypes. They are likely the same
+                    if "I" not in alignBtwnHap.cigar and "D" not in alignBtwnHap.cigar:
+                        # i.e. there are no indels between these two haplotypes. They are likely the same event
+                        # Keep the event which is closer to the reference
+                        if haplotype.scoreFromRef is not None and altAlignment.optimal_alignment_score > haplotype.scoreFromRef:
+                            candidateHaplotypes[name] = Haplotype(altAssembledHaplotype, eventLoc, altAlignment.optimal_alignment_score)
                         altMatchFound = True
                         break
 
                 if not altMatchFound:
                     # Store this new haplotype
-                    candidateHaplotypes[altAssembledHaplotype] = Haplotype(altAssembledHaplotype, eventLoc)
+                    candidateHaplotypes[altAssembledHaplotype] = Haplotype(altAssembledHaplotype, eventLoc, altAlignment.optimal_alignment_score)
+                    # Store these events as indels. The number of reads which support this event, and the number that do not, will be
+                    # counted during the pileup
+                    if self._chrom in self.rawIndels:
+                        for pos, eAttributes in eventLoc.items():
+                            eLength = eAttributes[0]
+                            eType = eAttributes[1]
+                            ePos = self._refStart + pos + refStart # + altAlignment.target_begin
+
+                            if ePos not in self.rawIndels[self._chrom]:
+                                self.rawIndels[self._chrom][ePos] = {}
+                            # Add event
+                            if eType not in self.rawIndels[self._chrom][ePos]:
+                                self.rawIndels[self._chrom][ePos][eType] = IndelPos(eType, eLength)
 
         return tuple(candidateHaplotypes.values())
 
     def _cigarFromAlignment(self, align, haplotypeDist):
-        """
+        """q
         For a given read (query sequence), generate a pysam-style cigar tuple
         Incorperate any differences between this haplotype and the reference as well
         :return:
@@ -1854,7 +2272,35 @@ class PileupEngine(object):
 
         return pysamCigar, cigar, readStartOffset
 
-    def _realign(self, haplotypes, endPoint, indelWindow = 200):
+    def _parseCurrentMatch(self, read):
+
+        # Convert the cigar sequence into a list for easy iteration
+        cigarList = self.cigarToTuple(read.cigartuples)
+
+        matches = set()
+        refPos = read.reference_start - self._refStart
+        readPos = 0
+
+        for cigarOp in cigarList:
+            if cigarOp == 0:  # Mapped base
+                # Is this base a match against the reference?
+                if read.query_sequence[readPos] == self._refWindow[refPos]:
+                    matches.add(refPos + self._refStart)
+                readPos += 1
+                refPos += 1
+            elif cigarOp == 2:  # Deletion
+                matches.add(refPos + self._refStart)
+                refPos += 1
+            elif cigarOp == 1:  # Insertion
+                readPos += 1
+            elif cigarOp == 4:  # Soft-clipping
+                readPos += 1
+            else:
+                raise ValueError("Unsupported cigar operator: \'%s\'" % cigarOp)
+
+        return matches
+
+    def _realign(self, haplotypes, endPoint=None, indelWindow = 200):
         """
         Realign all reads stored in the buffer against these haplotypes, and add the realigned reads to the pileip
 
@@ -1866,15 +2312,6 @@ class PileupEngine(object):
         haplotype were processed in an earlier window, don't process all indel-supporting reads in the earlier window
         :return:
         """
-
-        def readToIndel(pos, event, length, read):
-
-            # Add position
-            if pos not in self.rawIndels[read.reference_name]:
-                self.rawIndels[read.reference_name][pos] = {}
-            # Add event
-            if event not in self.rawIndels[read.reference_name][pos]:
-                self.rawIndels[read.reference_name][pos][event] = IndelPos(event, length)
 
         i = 0
         for read in self._indelReads:
@@ -1888,7 +2325,7 @@ class PileupEngine(object):
             for hap in haplotypes:
                 align = hap.alignmentStructure(read.query_sequence)
                 if align.optimal_alignment_score > maxScore:
-                    maxScore = align.optimal_alignment_score
+                    maxScore = align.optimal_alignment_score  # TODO: Add score offset here
                     maxAlignment = align
                     maxHap = hap
 
@@ -1896,27 +2333,22 @@ class PileupEngine(object):
             if maxHap.eventFromRef:
                 # Use the alt alignment
                 pysamCigar, listCigar, startOffset = self._cigarFromAlignment(maxAlignment, maxHap.eventFromRef)
-                maxHap.support.append(read)
+                maxHap.support += 1
+
+                # To prevent realignments being caused by SNVs from being called as real, flag which bases in
+                # the read do not contain mismatches currently
+                currentMatch = self._parseCurrentMatch(read)
 
                 # Update read statistics
                 read.reference_start = maxAlignment.query_begin + self._bufferPos + startOffset
                 read.cigartuples = pysamCigar
 
-                # Create an indel position for these events, if it does not exist already
-                for pos, event in maxHap.eventFromRef.items():
-
-                    length, indelType = event
-                    # Where is this event?
-                    # We need to subtract 1, since we will be referencing the indel from the proceeding mapped base
-                    pos = self._bufferPos + pos
-
-                    readToIndel(pos, indelType, length, read)
-
             else:
                 # For reads in which we are using the original alignment, generate a cigar list for easy processing
                 listCigar = self.cigarToTuple(read.cigartuples)
+                currentMatch = None
             # Add this realigned read to the pileup
-            self.processRead(read, listCigar)
+            self.processRead(read, listCigar, currentMatch)
 
             i += 1
 
@@ -1945,24 +2377,23 @@ class PileupEngine(object):
             # If the best haplotype mapping is the reference, keep the original alignment
             if maxHap.eventFromRef:
                 pysamCigar, listCigar, startOffset = self._cigarFromAlignment(maxAlignment, maxHap.eventFromRef)
-                maxHap.support.append(read)
+                maxHap.support += 1
+
+                # To prevent realignments being caused by SNVs from being called as real, flag which bases in
+                # the read currently are a perfect match against the reference
+                currentMatch = self._parseCurrentMatch(read)
 
                 # Update read statistics
                 read.reference_start = maxAlignment.query_begin + self._bufferPos + startOffset
                 read.cigartuples = pysamCigar
 
-                # Create an indel position for these events, if it does not exist already
-                for pos, event in maxHap.eventFromRef.items():
-                    length, indelType = event
-                    # Where is this event?
-                    pos = self._bufferPos + pos
-
-                    readToIndel(pos, indelType, length, read)
             else:
                 # For reads in which we are using the original alignment, generate a cigar list for easy processing
                 listCigar = self.cigarToTuple(read.cigartuples)
+                currentMatch = None
+
             # Add this realigned read to the pileup
-            self.processRead(read, listCigar)
+            self.processRead(read, listCigar, currentMatch)
             i += 1
         # Remove all realigned reads from the buffer
         self._bufferedReads = self._bufferedReads[i:]
@@ -1983,7 +2414,7 @@ class PileupEngine(object):
 
         return tuple(cigarList)
 
-    def generatePileup(self, chrom=None, readProcessBuffer=300):
+    def generatePileup(self, chrom=None, readProcessBuffer=400):
         """
 
         :param chrom: A string indicating which contig to process. If None, all contigs will be processed
@@ -2058,15 +2489,10 @@ class PileupEngine(object):
             :return:
             """
             # First, generate the haplotypes using reads with INDELs
-            haplotypes = self.generateHaplotypes()
+            haplotypes = self.generateHaplotypes(self._indelReads)
             # Map all reads in the buffer against these haplotypes
             if haplotypes is not None:
                 self._realign(haplotypes, windowEndPoint)
-
-                # Next, generate an indel position object for each haplotype
-                for hap in haplotypes:
-                    if len(hap.support) < self._minAltDepth:
-                        continue
 
             # If there are no alternative haplotypes, just add all reads to the pileup
             else:
@@ -2094,7 +2520,7 @@ class PileupEngine(object):
         # Sanity check that the realignment buffer is larger than the actual processing buffer, to ensure that
         # we are confident of the haplotypes that have been generated
         if self._realignBuffer < readProcessBuffer:
-            raise AttributeError("Based on the current buffer sizes, reads will be added to the pileup before they are properly realigned")
+            raise ValueError("Based on the current buffer sizes, reads will be added to the pileup before they are properly realigned")
 
         for read in self._inFile.fetch(contig=chrom):
 
@@ -2106,7 +2532,7 @@ class PileupEngine(object):
             if self.readCount % 100000 == 0:
                 if chrom is not None:
                     sys.stderr.write(
-                    "\t".join([self._printPrefix, time.strftime('%X'), chrom + ":Reads Processed:%s\n" % self.readCount]))
+                    "\t".join([self._printPrefix, time.strftime('%X'), chrom, "Reads Processed:%s\n" % self.readCount]))
                 else:                    sys.stderr.write(
                     "\t".join([self._printPrefix, time.strftime('%X'), "Reads Processed:%s\n" % self.readCount]))
 
@@ -2120,6 +2546,10 @@ class PileupEngine(object):
 
             # Ignore reads that are secondary or supplemental alignments
             if read.is_secondary or read.is_supplementary:
+                continue
+
+            # Ignore reads with a mapping quality of 0
+            if read.mapping_quality == 0:
                 continue
 
             # Have we advanced positions? If so, we may need to change the loaded reference window, and process
@@ -2288,7 +2718,7 @@ def validateArgs(args):
         listArgs.append("--" + argument)
 
         # If the parameter is a boolean, ignore it, as this will be reset once the arguments are re-parsed
-        if parameter == "True":
+        if parameter == "True" or parameter is True:
             continue
         # If the parameter is a list, we need to add each element seperately
         if isinstance(parameter, list):
@@ -2304,6 +2734,8 @@ def validateArgs(args):
                         help="An optional configuration file which can provide one or more arguments")
     parser.add_argument("-i", "--input", metavar="BAM", required=True, type=lambda x: isValidFile(x, parser),
                         help="Input post-collapse or post-clipoverlap BAM file")
+    parser.add_argument("-n", "--normal", metavar="BAM", type=lambda x: isValidFile(x, parser),
+                        help="Optional matched normal BAM file, for removing germline variants")
     parser.add_argument("-o", "--output", metavar="VCF", required=True, help="Output VCF file")
     parser.add_argument("-u", "--unfiltered", metavar="VCF",
                         help="An additional output VCF file, which lists all candidate variants, including those that failed filters")
@@ -2315,6 +2747,8 @@ def validateArgs(args):
                         help="A pickle file containing the trained filter. Can be generated using \'dellingr train\'")
     parser.add_argument("-j", "--jobs", metavar="INT", type=int, default=1,
                         help="How many chromosomes to process simultaneously")
+    #parser.add_argument("-m", "--mappability", metavar="WIG", type=lambda x: isValidFile(x, parser), required=True,
+    #                    help="Genome mappability wiggle file")
     parser.add_argument("--threshold", metavar="FLOAT", type=float, default=0.65,
                         help="Filtering threshold (lower=more lenient) [Default: 0.65]")
     parser.add_argument("--repeat_count_threshold", metavar="INT", type=int, default=4,
@@ -2338,6 +2772,9 @@ parser.add_argument("-c", "--config", metavar="INI", type=lambda x: isValidFile(
                     help="An optional configuration file which can provide one or more arguments")
 parser.add_argument("-i", "--input", metavar="BAM", type=lambda x: isValidFile(x, parser),
                     help="Input post-collapse or post-clipoverlap BAM file")
+
+parser.add_argument("-n", "--normal", metavar="BAM", type=lambda x:isValidFile(x, parser),
+                    help="Optional matched normal BAM file, for removing germline variants")
 parser.add_argument("-o", "--output", metavar="VCF", help="Output VCF file, listing all variants which passed filters")
 parser.add_argument("-u", "--unfiltered", metavar="VCF",
                     help="An additional output VCF file, which lists all candidate variants, including those that failed filters")
@@ -2348,6 +2785,8 @@ parser.add_argument("-t", "--targets", metavar="BED", type=lambda x: isValidFile
 parser.add_argument("-f", "--filter", metavar="PICKLE", type=lambda x: isValidFile(x, parser),
                     help="A pickle file containing a trained filter. Can be generated using \'dellingr train\'")
 parser.add_argument("-j", "--jobs", metavar="INT", type=int, help="How many chromosomes to process simultaneously")
+#parser.add_argument("-m", "--mappability", metavar="WIG", type=lambda x: isValidFile(x, parser),
+#                    help="Genome mappability wiggle file")
 parser.add_argument("--threshold", metavar="FLOAT", type=float,
                     help="Filtering threshold (lower=more lenient) [Default: 0.65]")
 parser.add_argument("--repeat_count_threshold", metavar="INT", type=int, help="If an indel is an expansion or contraction of a nearby repeat which occurs at least this many times, filter it [Default: 4]")
@@ -2380,10 +2819,6 @@ def main(args=None, sysStdin=None, printPrefix="DELLINGR-CALL\t"):
 
 
     args = validateArgs(args)
-
-    # Load filter
-    # with open(args["filter"], "r+b") as o:
-    #    filterModel = pickle.load(o)
 
     # Load filter
     try:
@@ -2433,6 +2868,8 @@ def main(args=None, sysStdin=None, printPrefix="DELLINGR-CALL\t"):
                 defaults.append(None)
             elif name == "printPrefix":
                 defaults.append(printPrefix)
+            elif name == "normalBAM":
+                defaults.append(args["normal"])
             else:
                 defaults.append(value.default)
             i += 1
@@ -2472,8 +2909,11 @@ def main(args=None, sysStdin=None, printPrefix="DELLINGR-CALL\t"):
         oVCFFiles = []
         uVCFFiles = []
         for contig in contigNames:
-            # Add output BAM name
-            oBAMName = args["realigned_BAM"] + "." + contig
+            # Specify the output BAM file for this contig
+            if args["realigned_BAM"] is not None:
+                oBAMName = args["realigned_BAM"] + "." + contig
+            else:
+                oBAMName = None
             bamFiles.append(oBAMName)
             multithreadArgs[i][0][outBAMIndex] = oBAMName
             # Add output VCF name
@@ -2492,7 +2932,7 @@ def main(args=None, sysStdin=None, printPrefix="DELLINGR-CALL\t"):
         # Run the jobs
         processPool = multiprocessing.Pool(processes=threads)
         try:
-            processPool.map_async(runCallMultithreaded, multithreadArgs)
+            processPool.imap_unordered(runCallMultithreaded, multithreadArgs)
             processPool.close()
             processPool.join()
         except KeyboardInterrupt as e:
@@ -2501,9 +2941,10 @@ def main(args=None, sysStdin=None, printPrefix="DELLINGR-CALL\t"):
             raise e
 
         # Finally, merge the output files
-        pysam.merge("-f", args["realigned_BAM"], *bamFiles)
-        for bFile in bamFiles:
-            os.remove(bFile)
+        if args["realigned_BAM"] is not None:
+            pysam.merge("-f", args["realigned_BAM"], *bamFiles)
+            for bFile in bamFiles:
+                os.remove(bFile)
         with open(args["output"], "w") as o:
             for oVCFFile in oVCFFiles:
                 with open(oVCFFile) as v:
@@ -2520,8 +2961,7 @@ def main(args=None, sysStdin=None, printPrefix="DELLINGR-CALL\t"):
 
     else:  # Singe-threaded
         pileup = PileupEngine(args["input"], args["reference"], args["targets"], minAltDepth=args["min_alt_depth"],
-                              oBAM=args["realigned_BAM"],
-                              printPrefix=printPrefix)
+                              oBAM=args["realigned_BAM"], normalBAM=args["normal"], printPrefix=printPrefix)
         first = True
         for contig in contigNames:
             # Find candidate variants
@@ -2530,11 +2970,11 @@ def main(args=None, sysStdin=None, printPrefix="DELLINGR-CALL\t"):
             # Filter variants
             if first:
                 pileup.filterAndWriteVariants(args["output"], filterModel, args["unfiltered"], args["threshold"],
-                                              args["duplex_support_only"], args["repeat_count_threshold"], writeHeader=True)
+                                              args["duplex_support_only"], args["min_alt_depth"], args["repeat_count_threshold"], writeHeader=True)
                 first = False
             else:
                 pileup.filterAndWriteVariants(args["output"], filterModel, args["unfiltered"], args["threshold"],
-                                              args["duplex_support_only"], args["repeat_count_threshold"])
+                                              args["duplex_support_only"], args["min_alt_depth"], args["repeat_count_threshold"])
             pileup.reset()
 
     sys.stderr.write("\t".join([printPrefix, time.strftime('%X'), "Call Complete\n"]))
