@@ -2,6 +2,8 @@
 
 from setuptools import setup, find_packages
 import re
+import subprocess
+import sys
 
 # Imports version number
 VERSIONFILE = "Dellingr/__version.py"
@@ -16,6 +18,30 @@ else:
 # Read in the README for the long description
 with open("README.md", "r") as fh:
     long_description = fh.read()
+
+# Due to dependency shenanigans, install all dependencies through pip install of easy_install
+# According to everything I have read, they should act the same, but they 100% do not
+dependencyList = [
+    "cython",
+    "seaborn",
+    "scipy",
+    "fisher",
+    "sortedcontainers",
+    "configobj",
+    "packaging",
+    "pyfaidx",
+    "pysam!=0.15.3",  # 0.15.3 does not compile
+    "scikit-learn==0.22.1",
+    "scikit-bio",
+    "numpy"
+]
+
+# Only run this command if we are installing Dellingr
+if sys.argv[-1] == "install":
+    installCom = ["pip", "install"]
+    installCom.extend(dependencyList)
+    subprocess.check_call(["pip", "install", "numpy"])  # WE ARE INSTALLING NUMPY FIRST BECAUSE ANGRY REASONS
+    subprocess.check_call(installCom)
 
 setup(
     name='Dellingr',
@@ -34,22 +60,9 @@ setup(
        "Topic :: Scientific/Engineering :: Bio-Informatics",
        "License :: OSI Approved :: GNU Affero General Public License v3"
        ],
-    setup_requires=["numpy"],
-    python_requires='>=3.4, <3.7',
-    install_requires=[  # This ordering is very important!!!!!!
-        "fisher",
-        "seaborn",
-        "scipy",
-        "sortedcontainers",
-        "configobj",
-        "pyfaidx",
-        "pysam",
-        "packaging",
-        "scikit-learn==0.19.2",
-        "scikit-bio",
-        "numpy==1.13"
-        ],
-    download_url="https://github.com/morinlab/Dellingr/dist/Dellingr-0.9.4.tar.gz",
+    python_requires='>=3.5',
+    install_requires=dependencyList,
+    download_url="https://github.com/morinlab/Dellingr/dist/Dellingr-0.9.5.tar.gz",
     scripts=["bin/dellingr"],
     package_data = {"Dellingr": ["LICENSE.txt", "README.md", "etc/default_filter.pkl"]},
     zip_safe = False,
