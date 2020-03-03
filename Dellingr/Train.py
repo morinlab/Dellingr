@@ -17,10 +17,10 @@ import seaborn
 import matplotlib.pyplot as plt
 try:
     import Call
-    import DellingrExceptions as pe
+    import ProDuSeExceptions as pe
 except ImportError:
-    from Dellingr import Call
-    from Dellingr import DellingrExceptions as pe
+    from ProDuSe import Call
+    from ProDuSe import ProDuSeExceptions as pe
 
 def isValidFile(file, parser, allowNone=False):
     """
@@ -117,18 +117,20 @@ def validateArgs(args):
                         help="Input post-collapse or post-clipoverlap BAM file")
     parser.add_argument("-v", "--validations", metavar="VCF", nargs="+", type=lambda x: isValidFile(x, parser),
                         help="Input VCF file listing validated variants.")
+#    parser.add_argument("-m", "--mappability", metavar="WIG", type=lambda x: isValidFile(x, parser), required=True,
+#                        help="UCSC genome mappability file in wiggle format")
     parser.add_argument("-o", "--output", metavar="PICKLE", required=True, help="Output pickle file, containing the filtering classifier")
     parser.add_argument("-r", "--reference", metavar="FASTA", required=True, type=lambda x: isValidFile(x, parser),
                         help="Reference Genome, in FASTA format")
     parser.add_argument("-t", "--targets", metavar="BED", nargs="+", type=lambda x: isValidFile(x, parser),
                         help="A BED file containing regions in which to restrict variant calling")
     miscArgs = parser.add_argument_group(description="Miscellaneous arguments")
-    miscArgs.add_argument("--ignore_vcfs", metavar="VCF", type=lambda x: isValidFile(x, parser), nargs="+",
-                        help="One or more optional VCF files listing variants that are to be excluded from filter training")
-    miscArgs.add_argument("-j", "--jobs", metavar="INT", type=int,
+    miscArgs.add_argument("--ignore_vcf", metavar="VCF", type=lambda x: isValidFile(x, parser),
+                        help="An optional VCF file listing variants that are to be excluded from filter training")
+    miscArgs.add_argument("-j", "--jobs", metavar="INT", type=int, default=1,
                           help="Number of chromosomes to process simultaneously")
     miscArgs.add_argument("--input_files", metavar="TSV", type=lambda x: isValidFile(x, parser),
-                          help="An input tab-deliniated file listing \'validations1.vcf input1.bam\'. May be used instead of \'-v\' and \'-b\'. May also specify targets.")
+                          help="An input tab-deliniated file listing \'validations1.vcf input1.bam\'. May be used instead of \'-v\' and \'-b\'. May also specify \'-t\'.")
     miscArgs.add_argument("--true_stats", metavar="TSV", type=str,
                           help="An output file containing all true variant status used to train the filter")
     miscArgs.add_argument("--false_stats", metavar="TSV", type=str,
@@ -145,7 +147,21 @@ def validateArgs(args):
 
     return args
 
+def processSampleMulti(args):
+    """
+    Unpacks processSample arguments
+
+    :param args: A list of arguments to be unpacked
+    :return: Twi tuples which contain variant stats for true and false variants
+    """
+
+    return processSample(*args)
+
 def processSample(bamFile, refGenome, targets, contig, trueVariants, ignoreVariants, printPrefix):
+
+    # Parse a temporary sample name
+    baseSName = os.path.basename(bamFile)
+    sampleName = baseSName.split(".")[0]
 
     # Run the pileup to identify candidate variants
     pileup = Call.PileupEngine(bamFile, refGenome, targets, printPrefix=printPrefix)
@@ -154,13 +170,13 @@ def processSample(bamFile, refGenome, targets, contig, trueVariants, ignoreVaria
     falseVarStats = []
 
     #if "_" not in contig:  # Don't print status messages for minor contigs
-    sys.stderr.write("\t".join([printPrefix, time.strftime('%X'), "Processing " + contig + "\n"]))
+    sys.stderr.write("\t".join([printPrefix, time.strftime('%X'), sampleName, "Processing " + contig + os.linesep]))
 
     # Find candidate variants (same as Call)
     pileup.generatePileup(chrom=contig)
 
     #if "_" not in contig:  # Don't print status messages for minor contigs
-    sys.stderr.write("\t".join([printPrefix, time.strftime('%X'), contig + ": Classifying Candidate Variants\n"]))
+    sys.stderr.write("\t".join([printPrefix, time.strftime('%X'), sampleName, contig + ": Classifying Candidate Variants" + os.linesep]))
     chromToDelete = []
     for chrom, positions in pileup.candidateVar.items():
 
@@ -184,20 +200,26 @@ def processSample(bamFile, refGenome, targets, contig, trueVariants, ignoreVaria
                     continue
                 # Obtain the stats that we wish to filter upon
 
-                posStats = pileup.varToFilteringStats(pos, maxAltAllele)
-
+                posStats = list(pileup.varToFilteringStats(pos, maxAltAllele, chrom, location))
+                # Add the location and sample nameof this variant to the end of the position stats. We will remove
+                # these before before filter training
+                posStats.append(chrom + ":" + str(location))
+                posStats.append(sampleName)
                 if chrom in trueVariants and location in trueVariants[chrom] and maxAltAllele in trueVariants[chrom][
                     location]:
                     trueVarStats.append(posStats)
                 else:
                     falseVarStats.append(posStats)
+
         chromToDelete.append(chrom)
     for chrom in chromToDelete:
         del pileup.candidateVar[chrom]
 
     # If there are more false variants than true variants (which is usually the case), subset them
-    if len(falseVarStats) > len(trueVarStats):
-        falseVarStats = random.sample(falseVarStats, len(trueVarStats))
+    # Take double the number of false variants as true variants, since there are far more artifact variants
+    # than real variants, and this will help us measure all the possible different artifact variants
+    if len(falseVarStats) > len(trueVarStats) * 2:
+        falseVarStats = random.sample(falseVarStats, len(trueVarStats) * 2)
 
     return trueVarStats, falseVarStats
 
@@ -252,6 +274,9 @@ def parseInputFiles(args):
 
 
 def generatePlots(outDir, trueVarStats, falseVarStats, featureNames):
+
+    # As position and sample are stored at the end of the variant stats, by iterating over the feature names
+    # we will automatically skip plotting those two elements
     for i in range(0, len(featureNames)):
         # What is this feature?
         name = featureNames[i]
@@ -276,15 +301,16 @@ parser.add_argument("-o", "--output", metavar="PICKLE", help="Output pickle file
 parser.add_argument("-r", "--reference", metavar="FASTA", type=lambda x: isValidFile(x, parser), help="Reference Genome, in FASTA format")
 parser.add_argument("-t", "--targets", metavar="BED", type=lambda x: isValidFile(x, parser, allowNone=True), nargs="+", help="One or more BED files containing regions in which to restrict variant calling. Must be specified in the same order as \'--bam\' (use \'None\' for no BED file)")
 parser.add_argument("-v", "--validations", metavar="VCF", type=lambda x: isValidFile(x, parser), nargs="+", help="One or more VCF files listing validated variants.")
+# parser.add_argument("-m", "--mappability", metavar="WIG", type=lambda x: isValidFile(x, parser), help="UCSC genome mappability file in wiggle format")
 miscArgs = parser.add_argument_group(description="Miscellaneous arguments")
-miscArgs.add_argument("--ignore_vcfs", metavar="VCF", type=lambda x: isValidFile(x, parser, allowNone=True), nargs="+", help="One or more optional VCF files listing variants that are to be excluded from filter training")
+miscArgs.add_argument("--ignore_vcf", metavar="VCF", type=lambda x: isValidFile(x, parser, allowNone=True), help="An optional VCF file listing variants that are to be excluded from filter training")
 miscArgs.add_argument("-j", "--jobs", metavar="INT", type=int, help="Number of chromosomes to process simultaneously")
 miscArgs.add_argument("--input_files", metavar="TSV", type=lambda x:isValidFile(x, parser), help="An input tab-deliniated file listing \'validations1.vcf input1.bam\'. May be used instead of \'-v\' and \'-b\'. May also specify targets.")
 miscArgs.add_argument("--true_stats", metavar="TSV", type=str, help="An output file containing all true variant status used to train the filter")
 miscArgs.add_argument("--false_stats", metavar="TSV", type=str, help="An optional output file containing all false variant status used to train the filter")
 miscArgs.add_argument("-d", "--plot_dir", metavar="DIR", help="An output directory for density plots visualizing the various characteristics")
 
-def main(args=None, sysStdin=None, printPrefix="DELLINGR-TRAIN\t"):
+def main(args=None, sysStdin=None, printPrefix="PRODUSE-TRAIN\t"):
     if args is None:
         args = parser.parse_args(args=sysStdin)
         args = vars(args)
@@ -309,8 +335,6 @@ def main(args=None, sysStdin=None, printPrefix="DELLINGR-TRAIN\t"):
         args["targets"] = [None] * len(args["bam"])
     elif len(args["targets"]) == 1:  # i.e. all samples have the same capture space
         args["targets"] = args["targets"] * len(args["bam"])
-    if args["ignore_vcfs"] is None:
-        args["ignore_vcfs"] = [None] * len(args["bam"])
 
     # Parse contig names
     contigNames = Fasta(args["reference"]).records.keys()
@@ -322,11 +346,11 @@ def main(args=None, sysStdin=None, printPrefix="DELLINGR-TRAIN\t"):
 
     # Load validated variants
     i = 0
+    ignoreVariants = loadVariants(args["ignore_vcf"])
     for validations in args["validations"]:
         trueVariants = loadVariants(validations)
-        ignoreVariants = loadVariants(args["ignore_vcfs"][i])
 
-        sys.stderr.write("\t".join([printPrefix, time.strftime('%X'), "Processing Sample \'%s\'\n" % args["bam"][i].split("/")[-1]]))
+        sys.stderr.write("\t".join([printPrefix, time.strftime('%X'), "Processing Sample \'%s\'\n" % os.path.basename(args["bam"][i])]))
 
         # Run single threaded
         if args["jobs"] == 1:
@@ -348,7 +372,7 @@ def main(args=None, sysStdin=None, printPrefix="DELLINGR-TRAIN\t"):
             multiprocArgs = list([args["bam"][i], args["reference"], args["targets"][i], x, trueVariants, ignoreVariants, printPrefix] for x in contigNames)
             processPool = multiprocessing.Pool(processes=threads)
             try:
-                varStats = processPool.starmap_async(processSample, multiprocArgs).get()
+                varStats = processPool.imap_unordered(processSampleMulti, multiprocArgs)
                 processPool.close()
                 processPool.join()
             except KeyboardInterrupt as e:
@@ -364,18 +388,20 @@ def main(args=None, sysStdin=None, printPrefix="DELLINGR-TRAIN\t"):
         i += 1
     sys.stderr.write("\t".join([printPrefix, time.strftime('%X'), "Training Random Forest\n"]))
     varFeatures = ["Total_Supporting_Molecules", "Strand_Bias", "Mean_Base_Quality", "Base_Quality_Bias",
-                           "Mean_Mapping_Quality", "Mapping_Quality_Bias", "Total_Depth", "Homopolymer",
-                           "Nearby_Mismatch_Proportion", "Mean_Read_Mismatches", "Read_Mismatch_Bias",
-                           "Mean_Family_Size", "Family_Size_Bias", "Mean_Distance_To_Read_End",
-                           "Duplex_Counts", "C->A mutation"]
+                        "Mean_Mapping_Quality", "Mapping_Quality_Bias", "Total_Depth", "Homopolymer", "Nearby_Mismatch_Proportion",
+                        "Mean_Read_Mismatches", "Read_Mismatch_Bias", "Mean_Family_Size", "Family_Size_Bias",
+                        "Duplex_Counts", "C->A mutation"]
 
     # Dump the stats used to train the filters to the specified output files
     with open(args["true_stats"] if args["true_stats"] is not None else os.devnull, "w") as t,\
             open(args["false_stats"] if args["false_stats"] is not None else os.devnull, "w") as f:
 
         # Write the file headers
-        f.write("\t".join(varFeatures))
-        t.write("\t".join(varFeatures))
+        outHeader = []
+        outHeader.extend(varFeatures)
+        outHeader.extend(["Position", "Sample"])
+        f.write("\t".join(outHeader))
+        t.write("\t".join(outHeader))
         f.write(os.linesep)
         t.write(os.linesep)
         for line in trueVarStats:
@@ -383,17 +409,13 @@ def main(args=None, sysStdin=None, printPrefix="DELLINGR-TRAIN\t"):
         for line in falseVarStats:
             f.write("\t".join(list(str(x) for x in line)) + os.linesep)
 
-    # Generate plots of these characteristics
-    if args["plot_dir"]:
-        generatePlots(args["plot_dir"], trueVarStats, falseVarStats, varFeatures)
-
     # Merge the false and true variant stats
-    varStats = trueVarStats
+    varStats = list(x[:-2] for x in trueVarStats)  # Strip off position and sample name
     realOrNot = [0] * len(trueVarStats)
-    varStats.extend(falseVarStats)
+    varStats.extend(list(x[:-2] for x in falseVarStats))
     realOrNot.extend([1]*len(falseVarStats))
 
-    filter = RandomForestClassifier(n_estimators=100, max_features="auto")
+    filter = RandomForestClassifier(n_estimators=100, max_features=None)
     filter.fit(varStats, realOrNot)
 
     # Write the trained classifier out to the file
@@ -401,6 +423,11 @@ def main(args=None, sysStdin=None, printPrefix="DELLINGR-TRAIN\t"):
         pickle._dump(filter, o)
 
     sys.stderr.write("\t".join([printPrefix, time.strftime('%X'), "Filter trained and saved in \'%s\'\n" % args["output"]]))
+
+    # Print a summary of the feature weights
+    sys.stdout.write("Filter feature importances" + os.linesep)
+    for feature, importance in zip(varFeatures, filter.feature_importances_):
+        sys.stdout.write(feature + "\t" + str(importance) + os.linesep)
 
     # Generate plots of these characteristics
     if args["plot_dir"]:
