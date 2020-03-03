@@ -13,7 +13,7 @@ See the full wiki page for more information: http://produse.readthedocs.io/en/la
 
 You will need to install the following before installing Dellingr:
 
-* `3.7>python>=3.4`
+* `python>=3.5`
 * `bwa>=0.7.0`
 * `samtools>=1.3.1`
 
