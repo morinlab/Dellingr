@@ -1,7 +1,7 @@
 #! /usr/bin/env python
 
 """
-Contains all custom exceptions thrown by ProDuSe
+Contains all custom exceptions thrown by Dellingr
 
 """
 
