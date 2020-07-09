@@ -905,7 +905,8 @@ def main(args=None, sysStdin=None):
 
         # Double check to ensure that --fastqs were provided, since we have assumed that they would be specified in the
         # sample config file
-        if "fastqs" not in runArgs:
+        if "fastqs" not in runArgs or runArgs["fastqs"] is None:
+            # If no FASTQs were provided, skip this sample
             sys.stderr.write("\t".join(
                 [printPrefix, time.strftime('%X'), "WARNING: No FASTQ files were provided for \'%s\'\n" % (sample)]))
             sys.stderr.write(
