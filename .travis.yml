@@ -1,5 +1,5 @@
 dist: bionic 
-sudo: required
+os: linux
 
 language: python
 python:
